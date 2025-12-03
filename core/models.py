@@ -124,6 +124,17 @@ class AcademicMember(Base):
     # Connections (Polymorphic-like)
     publication_connections = relationship("ResearcherPublication", back_populates="member")
     project_connections = relationship("ProjectResearcher", back_populates="member")
+    
+    # Many-to-Many with WPs
+    wps = relationship("WorkPackage", secondary="member_wps", back_populates="members_list")
+
+
+class MemberWP(Base):
+    """Many-to-many relationship between academic members and WPs."""
+    __tablename__ = "member_wps"
+    
+    member_id = Column(Integer, ForeignKey("academic_members.id"), primary_key=True)
+    wp_id = Column(Integer, ForeignKey("wps.id"), primary_key=True)
 
 
 class ResearcherDetails(Base):
@@ -211,7 +222,8 @@ class WorkPackage(Base):
     
     # Relationships
     projects = relationship("Project", back_populates="wp")
-    members = relationship("AcademicMember", back_populates="wp")
+    members = relationship("AcademicMember", back_populates="wp") # Legacy One-to-Many
+    members_list = relationship("AcademicMember", secondary="member_wps", back_populates="wps") # New Many-to-Many
 
 
 class Project(Base):

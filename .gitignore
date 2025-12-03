@@ -53,21 +53,21 @@ docs/_build/
 # Scripts de desarrollo (no publicar)
 # ======================================
 
-# Scripts de debugging
-scripts/debug_*.py
-scripts/investigate_*.py
-scripts/reproduce_*.py
-scripts/check_*.py
-scripts/inspect_*.py
-scripts/quick_*.py
+# # Scripts de debugging
+# scripts/debug_*.py
+# scripts/investigate_*.py
+# scripts/reproduce_*.py
+# scripts/check_*.py
+# scripts/inspect_*.py
+# scripts/quick_*.py
 
-# Scripts de testing/verificación temporal
-scripts/test_*.py
-scripts/verify_*.py
+# # Scripts de testing/verificación temporal
+# scripts/test_*.py
+# scripts/verify_*.py
 
-# Scripts de comparación/revisión
-scripts/compare_*.py
-scripts/restart_*.py
+# # Scripts de comparación/revisión
+# scripts/compare_*.py
+# scripts/restart_*.py
 
 # ======================================
 # Datos sensibles adicionales

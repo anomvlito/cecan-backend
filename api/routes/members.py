@@ -26,7 +26,8 @@ async def get_members(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    query = db.query(AcademicMember)
+    from sqlalchemy.orm import joinedload
+    query = db.query(AcademicMember).options(joinedload(AcademicMember.wps))
     if type:
         query = query.filter(AcademicMember.member_type == type)
     return query.offset(skip).limit(limit).all()

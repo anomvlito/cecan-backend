@@ -79,11 +79,31 @@ class StudentDetailsOut(StudentDetailsBase):
     class Config:
         from_attributes = True
 
+class WorkPackageSchema(BaseModel):
+    id: int
+    nombre: str
+    class Config:
+        from_attributes = True
+
 class AcademicMemberOut(AcademicMemberBase):
     id: int
     created_at: Optional[datetime] = None
     researcher_details: Optional[ResearcherDetailsOut] = None
     student_details: Optional[StudentDetailsOut] = None
+    wps: List[WorkPackageSchema] = []
 
     class Config:
         from_attributes = True
+
+# Public API Schemas
+class PublicationSummarySchema(BaseModel):
+    id: int
+    title: str
+    year: Optional[str] = None
+    url: Optional[str] = None
+    doi: Optional[str] = None
+
+class ResearcherSummarySchema(BaseModel):
+    id: int
+    full_name: str
+    avatar_url: Optional[str] = None

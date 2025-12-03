@@ -1,50 +1,14 @@
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from typing import List, Optional
 import sqlite3
+import json
 from config import DB_PATH
-from config import DB_PATH
-from database.legacy_wrapper import CecanDB
-from schemas import PublicationSummarySchema, ResearcherSummarySchema
 
-router = APIRouter(prefix="/public", tags=["Public"])
-
-# --- Schemas ---
-
-class PublicResearcherMetrics(BaseModel):
-    h_index: Optional[int] = None
-    total_citations: Optional[int] = None
-
-class PublicResearcherOut(BaseModel):
-    id: int
-    full_name: str
-    photo_url: Optional[str] = None
-    category: Optional[str] = None
-    wp_name: Optional[str] = None
-    metrics: PublicResearcherMetrics
-    publications: List[PublicationSummarySchema] = []
-
-class PublicPublicationOut(BaseModel):
-    id: int
-    title: str
-    year: Optional[str] = None
-    url: Optional[str] = None
-    doi: Optional[str] = None
-    authors: List[ResearcherSummarySchema] = []
-
-# --- Endpoints ---
-
-@router.get("/researchers", response_model=List[PublicResearcherOut])
-async def get_public_researchers():
-    """
-    Get public list of researchers with sanitized fields.
-    """
+def test_researchers_query():
+    print("Testing Researchers Query...")
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
     try:
-        # Join AcademicMember, ResearcherDetails, and WorkPackage
         query = """
             SELECT 
                 am.id, 
@@ -58,6 +22,7 @@ async def get_public_researchers():
             LEFT JOIN researcher_details rd ON am.id = rd.member_id
             LEFT JOIN wps wp ON am.wp_id = wp.id
             WHERE am.member_type = 'researcher' AND am.is_active = 1
+            LIMIT 5
         """
         cursor.execute(query)
         rows = cursor.fetchall()
@@ -67,13 +32,6 @@ async def get_public_researchers():
             researchers_map[row["id"]] = {
                 "id": row["id"],
                 "full_name": row["full_name"],
-                "photo_url": row["photo_url"],
-                "category": row["category"],
-                "wp_name": row["wp_name"],
-                "metrics": {
-                    "h_index": row["h_index"],
-                    "total_citations": row["total_citations"]
-                },
                 "publications": []
             }
             
@@ -99,28 +57,25 @@ async def get_public_researchers():
                 if pub["member_id"] in researchers_map:
                     researchers_map[pub["member_id"]]["publications"].append({
                         "id": pub["id"],
-                        "title": pub["title"],
+                        "title": pub["title"][:30] + "...",
                         "year": pub["year"],
                         "url": pub["url"]
                     })
         
-        return list(researchers_map.values())
+        print(json.dumps(list(researchers_map.values()), indent=2))
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching researchers: {str(e)}")
+        print(f"Error: {e}")
     finally:
         conn.close()
 
-@router.get("/publications", response_model=List[PublicPublicationOut])
-async def get_public_publications():
-    """
-    Get public list of publications with authors.
-    """
+def test_publications_query():
+    print("\nTesting Publications Query...")
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
     try:
-        # Fetch all publications
         query = """
             SELECT 
                 id, 
@@ -128,6 +83,7 @@ async def get_public_publications():
                 fecha as year, 
                 url_origen as url
             FROM publicaciones
+            LIMIT 5
         """
         cursor.execute(query)
         rows = cursor.fetchall()
@@ -136,14 +92,16 @@ async def get_public_publications():
         for row in rows:
             publications_map[row["id"]] = {
                 "id": row["id"],
-                "title": row["title"],
-                "year": row["year"],
+                "title": row["title"][:30] + "...",
                 "url": row["url"],
                 "authors": []
             }
             
-        # Fetch all author connections
-        auth_query = """
+        # For test, just fetch authors for these 5 publications
+        pub_ids = list(publications_map.keys())
+        placeholders = ",".join("?" * len(pub_ids))
+        
+        auth_query = f"""
             SELECT 
                 ip.publicacion_id,
                 am.id,
@@ -152,9 +110,9 @@ async def get_public_publications():
             FROM academic_members am
             JOIN investigador_publicacion ip ON am.id = ip.member_id
             LEFT JOIN researcher_details rd ON am.id = rd.member_id
-            WHERE am.member_type = 'researcher'
+            WHERE am.member_type = 'researcher' AND ip.publicacion_id IN ({placeholders})
         """
-        cursor.execute(auth_query)
+        cursor.execute(auth_query, pub_ids)
         auth_rows = cursor.fetchall()
         
         for auth in auth_rows:
@@ -165,24 +123,13 @@ async def get_public_publications():
                     "avatar_url": auth["avatar_url"]
                 })
         
-        return list(publications_map.values())
+        print(json.dumps(list(publications_map.values()), indent=2))
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching publications: {str(e)}")
+        print(f"Error: {e}")
     finally:
         conn.close()
 
-@router.get("/graph")
-async def get_public_graph():
-    """
-    Get simplified graph data for public visualization.
-    """
-    db = CecanDB()
-    try:
-        data = db.get_graph_data()
-        # We could filter sensitive data here if needed, but get_graph_data seems already safe enough for now
-        # based on the legacy implementation.
-        return data
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching graph data: {str(e)}")
-    finally:
-        db.close()
+if __name__ == "__main__":
+    test_researchers_query()
+    test_publications_query()
