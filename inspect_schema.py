@@ -22,6 +22,15 @@ def inspect_table(table_name):
         conn.close()
 
 if __name__ == "__main__":
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    tables = cursor.fetchall()
+    print("Tables found:", [t[0] for t in tables])
+    conn.close()
+
+    if "users" in [t[0] for t in tables]:
+        inspect_table("users")
+    
     inspect_table("academic_members")
-    inspect_table("proyecto_investigador")
-    inspect_table("proyectos")
+    inspect_table("researcher_details")
