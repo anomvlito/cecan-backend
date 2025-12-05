@@ -1,10 +1,31 @@
 import numpy as np
 import numpy as np
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import os
 import sys
 
 from database.legacy_wrapper import CecanDB
+
+# Singleton instance for SemanticSearchEngine
+_engine_instance: Optional['SemanticSearchEngine'] = None
+
+def get_semantic_engine(api_key: str = None) -> 'SemanticSearchEngine':
+    """
+    Returns a singleton instance of SemanticSearchEngine.
+    This ensures embeddings are loaded only once and reused across requests.
+    """
+    global _engine_instance
+    if _engine_instance is None:
+        print("   [System] Creating new SemanticSearchEngine singleton...")
+        _engine_instance = SemanticSearchEngine(api_key=api_key)
+    return _engine_instance
+
+def reset_semantic_engine():
+    """Resets the singleton instance. Use only for testing or forced refresh."""
+    global _engine_instance
+    if _engine_instance:
+        _engine_instance.close()
+        _engine_instance = None
 
 class SemanticSearchEngine:
     def __init__(self, api_key=None):
@@ -60,7 +81,7 @@ class SemanticSearchEngine:
         conn = self.db.conn
         cursor = conn.cursor()
         try:
-            cursor.execute("SELECT id, publicacion_id, content, embedding FROM PublicationChunks")
+            cursor.execute("SELECT id, publicacion_id, content, embedding FROM publication_chunks")
             rows = cursor.fetchall()
             
             self.pub_chunks = []
@@ -95,7 +116,7 @@ class SemanticSearchEngine:
         
         # Get publications with text content
         try:
-            cursor.execute("SELECT id, titulo, contenido_texto FROM Publicaciones WHERE contenido_texto IS NOT NULL AND contenido_texto != ''")
+            cursor.execute("SELECT id, titulo, contenido_texto FROM publicaciones WHERE contenido_texto IS NOT NULL AND contenido_texto != ''")
             pubs = cursor.fetchall()
         except Exception as e:
             print(f"   [Error] Failed to fetch publications: {e}")
@@ -107,7 +128,7 @@ class SemanticSearchEngine:
         for pub_id, title, content in pubs:
             try:
                 # Check if already chunked
-                cursor.execute("SELECT count(*) FROM PublicationChunks WHERE publicacion_id = ?", (pub_id,))
+                cursor.execute("SELECT count(*) FROM publication_chunks WHERE publicacion_id = ?", (pub_id,))
                 if cursor.fetchone()[0] > 0:
                     continue
                     
@@ -159,7 +180,7 @@ class SemanticSearchEngine:
                         continue
                     try:
                         cursor.execute("""
-                            INSERT INTO PublicationChunks (publicacion_id, chunk_index, content, embedding)
+                            INSERT INTO publication_chunks (publicacion_id, chunk_index, content, embedding)
                             VALUES (?, ?, ?, ?)
                         """, (pub_id, i, chunk, json.dumps(emb)))
                         saved_chunks += 1
@@ -242,18 +263,18 @@ class SemanticSearchEngine:
             return []
 
     def search_researcher_knowledge(self, query: str, researcher_name: str, top_k: int = 5) -> List[str]:
-        """Performs semantic search on PUBLICATION CHUNKS, filtered by researcher."""
+        """Performs semantic search on PUBLICATION CHUNKS, filtered by academic member."""
         if self.pub_embeddings is None or len(self.pub_embeddings) == 0:
             return []
 
         try:
-            # 1. Get Publication IDs for this researcher
+            # 1. Get Publication IDs for this academic member
             cursor = self.db.conn.cursor()
             cursor.execute("""
                 SELECT ip.publicacion_id 
-                FROM Investigador_Publicacion ip
-                JOIN Investigadores i ON ip.investigador_id = i.id
-                WHERE i.nombre LIKE ?
+                FROM investigador_publicacion ip
+                JOIN academic_members am ON ip.member_id = am.id
+                WHERE am.full_name LIKE ?
             """, (f"%{researcher_name}%",))
             pub_ids = {row[0] for row in cursor.fetchall()}
             
@@ -299,4 +320,3 @@ class SemanticSearchEngine:
 
     def close(self):
         self.db.close()
-

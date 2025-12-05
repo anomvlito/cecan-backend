@@ -107,3 +107,18 @@ class ResearcherSummarySchema(BaseModel):
     id: int
     full_name: str
     avatar_url: Optional[str] = None
+
+# Sankey Diagram Schemas
+class SankeyNode(BaseModel):
+    id: str
+    nodeColor: Optional[str] = None
+
+class SankeyLink(BaseModel):
+    source: str
+    target: str
+    value: int
+
+class SankeyData(BaseModel):
+    nodes: List[SankeyNode]
+    links: List[SankeyLink]
+

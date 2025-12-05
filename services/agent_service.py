@@ -6,7 +6,8 @@ from collections.abc import Iterable
 import sys
 
 from database.legacy_wrapper import CecanDB
-from services.rag_service import SemanticSearchEngine
+from services.rag_service import get_semantic_engine
+
 
 class CecanAgent:
     def __init__(self, api_key=None):
@@ -24,9 +25,9 @@ class CecanAgent:
         self.db = CecanDB()
         self.db.connect()
         
-        # Initialize Semantic Search Engine
+        # Initialize Semantic Search Engine (uses singleton)
         try:
-            self.semantic_engine = SemanticSearchEngine(api_key=api_key)
+            self.semantic_engine = get_semantic_engine(api_key=api_key)
         except Exception as e:
             print(f"Warning: Semantic search could not be initialized: {e}")
             self.semantic_engine = None
@@ -65,9 +66,9 @@ class CecanAgent:
         3.  **Conectado:** Relaciona siempre el tema con la estrategia mayor del CECAN (interdisciplina, impacto público, prevención).
         
         USO DE INFORMACIÓN:
-        - Si te preguntan por un **Investigador**: Consulta sus publicaciones (tool: `consult_researcher_knowledge`) y sintetiza sus líneas de investigación, metodologías y aportes clave. No listes papers, explica sus ideas.
+        - Si te preguntan por un **AcademicMember**: Consulta sus publicaciones (tool: `consult_researcher_knowledge`) y sintetiza sus líneas de investigación, metodologías y aportes clave. No listes papers, explica sus ideas.
         - Si te preguntan por un **Proyecto**: Explica su relevancia, quiénes lo lideran y cómo se conecta con otros temas (WPs/Nodos).
-        - Si te preguntan por un **Nodo/Tema**: Explica qué es, por qué es crítico y menciona ejemplos de proyectos o investigadores que lo abordan.
+        - Si te preguntan por un **Nodo/Tema**: Explica qué es, por qué es crítico y menciona ejemplos de proyectos o AcademicMemberes que lo abordan.
         
         Si la información es insuficiente, haz una deducción inteligente basada en el contexto o sugiere una perspectiva relacionada, pero no te quedes en blanco ni pidas disculpas excesivas.
         
@@ -75,7 +76,7 @@ class CecanAgent:
         """
 
     def search_projects(self, keyword: str):
-        """Busca proyectos por título, investigador, nodo o WP (coincidencia exacta o parcial de texto)."""
+        """Busca proyectos por título, AcademicMember, nodo o WP (coincidencia exacta o parcial de texto)."""
         print(f"   [Tool] Buscando proyectos (SQL) con: '{keyword}'...")
         return self.db.search_projects(keyword)
 
@@ -88,8 +89,8 @@ class CecanAgent:
             return "La búsqueda semántica no está disponible en este momento."
 
     def consult_researcher_knowledge(self, query: str, researcher_name: str):
-        """Busca información específica en las publicaciones (PDFs) de un investigador. Úsalo para responder preguntas sobre 'qué dice X sobre Y'."""
-        print(f"   [Tool] Consultando conocimiento del investigador '{researcher_name}' sobre: '{query}'...")
+        """Busca información específica en las publicaciones (PDFs) de un AcademicMember. Úsalo para responder preguntas sobre 'qué dice X sobre Y'."""
+        print(f"   [Tool] Consultando conocimiento del AcademicMember '{researcher_name}' sobre: '{query}'...")
         if self.semantic_engine:
             results = self.semantic_engine.search_researcher_knowledge(query, researcher_name)
             return results
@@ -97,7 +98,7 @@ class CecanAgent:
             return "La búsqueda en publicaciones no está disponible."
 
     def get_project_details(self, project_id: int):
-        """Obtiene detalles completos de un proyecto por su ID, incluyendo investigadores y nodos."""
+        """Obtiene detalles completos de un proyecto por su ID, incluyendo AcademicMemberes y nodos."""
         print(f"   [Tool] Obteniendo detalles del proyecto ID: {project_id}...")
         return self.db.get_project_details(project_id)
         
@@ -117,5 +118,4 @@ class CecanAgent:
 
     def close(self):
         self.db.close()
-        if self.semantic_engine:
-            self.semantic_engine.close()
+        # Note: Do NOT close semantic_engine here - it's a shared singleton
