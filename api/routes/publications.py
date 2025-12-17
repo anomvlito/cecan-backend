@@ -3,15 +3,17 @@ Publication Routes for CECAN Platform
 API endpoints for publications and data management
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from sqlalchemy.orm import Session
 import sqlite3
 import threading
+from datetime import datetime
 
 from database.session import get_db
 from api.routes.auth import require_editor, get_current_user, User
 from config import DB_PATH
-from services import scraper_service
+from services import scraper_service, compliance_service, publication_service
+from core.models import Publication
 
 router = APIRouter(prefix="/publications", tags=["Publications"])
 
@@ -57,6 +59,88 @@ async def sync_publications(
         "status": "started",
         "message": "Publications synchronization started in background"
     }
+
+
+@router.post("/audit")
+async def run_audit(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_editor)
+):
+    """
+    Trigger full compliance audit.
+    Requires Editor role.
+    """
+    try:
+        compliance_service.run_full_audit(db)
+        return {"status": "completed", "message": "Audit completed successfully"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/audit/reset")
+async def reset_audit(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_editor)
+):
+    """
+    Reset compliance audit status for all publications.
+    Requires Editor role.
+    """
+    try:
+        compliance_service.reset_audit_status(db)
+        return {"status": "completed", "message": "Audit status reset successfully"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/upload")
+async def upload_pdf(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_editor)
+):
+    """
+    Upload a PDF publication and extract its text content.
+    Requires Editor role.
+    """
+    try:
+        # Read file content
+        content = await file.read()
+        
+        # Validate PDF
+        is_valid, error_msg = publication_service.validate_pdf_file(file.filename, content)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=error_msg)
+        
+        # Extract text from PDF
+        extracted_text = publication_service.extract_text_from_pdf(content)
+        
+        # Create new publication
+        new_pub = Publication(
+            titulo=file.filename,
+            autores="Desconocido (PDF Upload)",
+            fecha=str(datetime.now().year),
+            contenido_texto=extracted_text if extracted_text else "(Sin texto extraíble - PDF escaneado)",
+            has_funding_ack=False,
+            anid_report_status="Pending"
+        )
+        
+        db.add(new_pub)
+        db.commit()
+        db.refresh(new_pub)
+        
+        return {
+            "id": new_pub.id,
+            "status": "success",
+            "filename": file.filename,
+            "text_extracted": len(extracted_text) > 0,
+            "message": "PDF cargado correctamente"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error procesando PDF: {str(e)}")
 
 
 @router.post("/{pub_id}/summary")

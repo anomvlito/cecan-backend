@@ -76,7 +76,7 @@ class Publication(Base):
     # COMPLIANCE AUDIT FIELDS (El Robot)
     has_valid_affiliation = Column(Boolean, default=False, nullable=False)
     has_funding_ack = Column(Boolean, default=False, nullable=False)
-    anid_report_status = Column(SQLEnum(ComplianceStatus), default=ComplianceStatus.ERROR, nullable=False)
+    anid_report_status = Column(String(50), default="Pending", nullable=False)
     
     # Audit metadata
     last_audit_date = Column(DateTime, nullable=True)

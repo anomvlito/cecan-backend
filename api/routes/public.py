@@ -30,6 +30,8 @@ class PublicPublicationOut(BaseModel):
     year: Optional[str] = None
     url: Optional[str] = None
     doi: Optional[str] = None
+    has_funding_ack: bool = False
+    anid_report_status: str = "Pending"
     authors: List[ResearcherSummarySchema] = []
 
 # --- Endpoints ---
@@ -87,7 +89,9 @@ async def get_public_researchers():
                     p.id,
                     p.titulo as title,
                     p.fecha as year,
-                    p.url_origen as url
+                    p.url_origen as url,
+                    p.has_funding_ack,
+                    p.anid_report_status
                 FROM publicaciones p
                 JOIN investigador_publicacion ip ON p.id = ip.publicacion_id
                 WHERE ip.member_id IN ({placeholders})
@@ -101,7 +105,9 @@ async def get_public_researchers():
                         "id": pub["id"],
                         "title": pub["title"],
                         "year": pub["year"],
-                        "url": pub["url"]
+                        "url": pub["url"],
+                        "has_funding_ack": bool(pub["has_funding_ack"]) if pub["has_funding_ack"] is not None else False,
+                        "anid_report_status": pub["anid_report_status"] or "Pending"
                     })
         
         return list(researchers_map.values())
@@ -126,7 +132,9 @@ async def get_public_publications():
                 id, 
                 titulo as title, 
                 fecha as year, 
-                url_origen as url
+                url_origen as url,
+                has_funding_ack,
+                anid_report_status
             FROM publicaciones
         """
         cursor.execute(query)
@@ -139,6 +147,8 @@ async def get_public_publications():
                 "title": row["title"],
                 "year": row["year"],
                 "url": row["url"],
+                "has_funding_ack": bool(row["has_funding_ack"]) if row["has_funding_ack"] is not None else False,
+                "anid_report_status": row["anid_report_status"] or "Pending",
                 "authors": []
             }
             
