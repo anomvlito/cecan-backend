@@ -40,8 +40,11 @@ class CecanAgent:
             self.consult_researcher_knowledge
         ]
         
+        # Get model name from environment variable
+        model_name = os.environ.get("GEMINI_MODEL_NAME", "gemini-2.0-flash-exp")
+        
         self.model = self.genai.GenerativeModel(
-            model_name='gemini-2.0-flash',
+            model_name=model_name,
             tools=self.tools,
             system_instruction=self._get_system_instruction()
         )

@@ -1,10 +1,13 @@
 import numpy as np
-import numpy as np
 from typing import List, Dict, Any, Optional
 import os
 import sys
+from pathlib import Path
 
 from database.legacy_wrapper import CecanDB
+
+# FAISS persistence path
+VECTORSTORE_PATH = Path("backend/data/vectorstore/projects")
 
 # Singleton instance for SemanticSearchEngine
 _engine_instance: Optional['SemanticSearchEngine'] = None
@@ -51,30 +54,103 @@ class SemanticSearchEngine:
 
     def _initialize_embeddings(self):
         """Fetches all projects and generates/caches embeddings."""
-        print("   [System] Initializing Semantic Search Engine (generating embeddings)...")
-        self.projects = self.db.get_all_projects_for_embedding()
         
-        if self.projects:
-            texts = [p['text'] for p in self.projects]
-            try:
-                # Using the new embedding model
-                result = self.genai.embed_content(
-                    model="models/text-embedding-004",
-                    content=texts,
-                    task_type="retrieval_document",
-                    title="Cecan Projects"
-                )
-                self.embeddings = np.array(result['embedding'])
-                print(f"   [System] Generated embeddings for {len(self.projects)} projects.")
-            except Exception as e:
-                print(f"   [Error] Failed to generate project embeddings: {e}")
-                self.embeddings = np.array([])
+        # Check if persisted index exists
+        if VECTORSTORE_PATH.exists() and (VECTORSTORE_PATH / "index.faiss").exists():
+            print("   [System] Loading existing project embeddings from disk...")
+            self._load_embeddings_from_disk()
         else:
-            print("   [System] No projects found to embed.")
-            self.embeddings = np.array([])
-
+            print("   [System] No cached embeddings found. Generating and saving new embeddings...")
+            self._generate_and_save_embeddings()
+        
         # Initialize Publication Embeddings (Load from DB)
         self._load_publication_embeddings()
+    
+    def _load_embeddings_from_disk(self):
+        """Loads project embeddings from FAISS index on disk."""
+        try:
+            from langchain_community.vectorstores import FAISS
+            from langchain_community.embeddings import FakeEmbeddings
+            
+            # Load FAISS index
+            vectorstore = FAISS.load_local(
+                str(VECTORSTORE_PATH),
+                FakeEmbeddings(size=768),  # text-embedding-004 produces 768-dim vectors
+                allow_dangerous_deserialization=True
+            )
+            
+            # Reconstruct projects and embeddings
+            self.projects = self.db.get_all_projects_for_embedding()
+            self.embeddings = np.array([vectorstore.index.reconstruct(i) for i in range(vectorstore.index.ntotal)])
+            
+            print(f"   [System] Loaded {len(self.projects)} project embeddings from disk.")
+        except Exception as e:
+            print(f"   [Error] Failed to load embeddings from disk: {e}")
+            print("   [System] Falling back to regeneration...")
+            self._generate_and_save_embeddings()
+    
+    def _generate_and_save_embeddings(self):
+        """Generates embeddings for all projects and saves them to disk."""
+        self.projects = self.db.get_all_projects_for_embedding()
+        
+        if not self.projects:
+            print("   [System] No projects found to embed.")
+            self.embeddings = np.array([])
+            return
+        
+        texts = [p['text'] for p in self.projects]
+        
+        try:
+            # Generate embeddings using Gemini
+            result = self.genai.embed_content(
+                model="models/text-embedding-004",
+                content=texts,
+                task_type="retrieval_document",
+                title="Cecan Projects"
+            )
+            self.embeddings = np.array(result['embedding'])
+            print(f"   [System] Generated embeddings for {len(self.projects)} projects.")
+            
+            # Save to FAISS index
+            self._save_embeddings_to_disk()
+            
+        except Exception as e:
+            print(f"   [Error] Failed to generate project embeddings: {e}")
+            self.embeddings = np.array([])
+    
+    def _save_embeddings_to_disk(self):
+        """Saves project embeddings to FAISS index on disk."""
+        try:
+            from langchain_community.vectorstores import FAISS
+            from langchain_community.docstore.in_memory import InMemoryDocstore
+            from langchain_community.embeddings import FakeEmbeddings
+            import faiss
+            
+            # Create FAISS index
+            dimension = self.embeddings.shape[1]
+            index = faiss.IndexFlatL2(dimension)
+            index.add(self.embeddings.astype('float32'))
+            
+            # Create vector store
+            fake_embeddings = FakeEmbeddings(size=dimension)
+            docstore = InMemoryDocstore({})
+            index_to_docstore_id = {}
+            
+            vectorstore = FAISS(
+                embedding_function=fake_embeddings,
+                index=index,
+                docstore=docstore,
+                index_to_docstore_id=index_to_docstore_id
+            )
+            
+            # Save to disk
+            VECTORSTORE_PATH.mkdir(parents=True, exist_ok=True)
+            vectorstore.save_local(str(VECTORSTORE_PATH))
+            
+            print(f"   [System] Saved {len(self.embeddings)} embeddings to {VECTORSTORE_PATH}")
+            
+        except Exception as e:
+            print(f"   [Error] Failed to save embeddings to disk: {e}")
 
     def _load_publication_embeddings(self):
         """Loads publication chunks and their embeddings from DB."""
@@ -107,6 +183,97 @@ class SemanticSearchEngine:
         except Exception as e:
             print(f"   [Error] Failed to load publication embeddings: {e}")
             self.pub_embeddings = np.array([])
+
+    def process_single_publication(self, pub_id: int) -> dict:
+        """
+        Procesa y embebea una sola publicación recién subida.
+        Retorna metadata de procesamiento para feedback al usuario.
+        """
+        conn = self.db.conn
+        cursor = conn.cursor()
+        
+        try:
+            # 1. Fetch publication
+            cursor.execute("SELECT id, titulo, contenido_texto FROM publicaciones WHERE id = ?", (pub_id,))
+            row = cursor.fetchone()
+            
+            if not row:
+                return {"success": False, "error": "Publication not found"}
+            
+            pub_id, title, content = row
+            
+            # 2. Validate content
+            if not content or len(content) < 100:
+                return {"success": False, "error": "Insufficient content (menos de 100 caracteres)", "chunks_created": 0}
+            
+            # 3. Check if already processed
+            cursor.execute("SELECT count(*) FROM publication_chunks WHERE publicacion_id = ?", (pub_id,))
+            existing_chunks = cursor.fetchone()[0]
+            if existing_chunks > 0:
+                print(f"   [RAG] Publication {pub_id} already indexed with {existing_chunks} chunks")
+                return {"success": True, "already_indexed": True, "chunks_created": existing_chunks}
+            
+            # 4. Generate chunks
+            chunk_size = 1000
+            overlap = 200
+            chunks = []
+            
+            for i in range(0, len(content), chunk_size - overlap):
+                chunk_text = content[i:i + chunk_size]
+                if len(chunk_text) < 100:
+                    continue
+                full_chunk = f"Publicación: {title}\nContenido: {chunk_text}"
+                chunks.append(full_chunk)
+            
+            if not chunks:
+                return {"success": False, "error": "No valid chunks created", "chunks_created": 0}
+            
+            # 5. Generate embeddings
+            import json
+            saved_chunks = 0
+            failed_chunks = 0
+            
+            for idx, chunk in enumerate(chunks):
+                try:
+                    emb = self.genai.embed_content(
+                        model="models/text-embedding-004",
+                        content=chunk,
+                        task_type="retrieval_document"
+                    )['embedding']
+                    
+                    cursor.execute("""
+                        INSERT INTO publication_chunks (publicacion_id, chunk_index, content, embedding)
+                        VALUES (?, ?, ?, ?)
+                    """, (pub_id, idx, chunk, json.dumps(emb)))
+                    saved_chunks += 1
+                except Exception as e:
+                    print(f"   [Error] Failed to embed chunk {idx} of publication {pub_id}: {e}")
+                    failed_chunks += 1
+                    continue
+            
+            if saved_chunks > 0:
+                conn.commit()
+                
+                # 6. Reload embeddings in memory
+                print(f"   [RAG] Reloading embeddings to include new publication...")
+                self._load_publication_embeddings()
+                
+                print(f"   [Success] Publication '{title}' indexed: {saved_chunks} chunks saved, {failed_chunks} failed")
+                
+                return {
+                    "success": True,
+                    "chunks_created": saved_chunks,
+                    "chunks_failed": failed_chunks,
+                    "publication_title": title,
+                    "now_searchable": True,
+                    "already_indexed": False
+                }
+            else:
+                return {"success": False, "error": "Failed to save any chunks", "chunks_created": 0}
+                
+        except Exception as e:
+            print(f"   [Error] Failed to process single publication {pub_id}: {e}")
+            return {"success": False, "error": str(e), "chunks_created": 0}
 
     def process_and_embed_publications(self):
         """Chunks and embeds publications that don't have chunks yet."""
@@ -318,5 +485,19 @@ class SemanticSearchEngine:
             print(f"   [Error] Researcher knowledge search failed: {e}")
             return []
 
+    def refresh_index(self):
+        """Forces regeneration of project embeddings index."""
+        print("   [System] Forcing refresh of project embeddings...")
+        
+        # Delete existing cache
+        if VECTORSTORE_PATH.exists():
+            import shutil
+            shutil.rmtree(VECTORSTORE_PATH)
+            print("   [System] Deleted existing cache.")
+        
+        # Regenerate
+        self._generate_and_save_embeddings()
+        print("   [System] Index refresh complete.")
+    
     def close(self):
         self.db.close()
