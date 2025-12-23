@@ -6,9 +6,12 @@ from fastapi import APIRouter, HTTPException, Query, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from typing import Dict, Any, List
+from typing import Dict, Any, List
 import os
+from datetime import datetime
 
 from services.scraper_service import get_openalex_metrics, get_semantic_scholar_metrics
+from services.openalex_service import extract_publication_metadata
 from database.session import get_db
 from core.models import Publication
 
@@ -248,13 +251,15 @@ async def audit_doi_links(
             # Polite pool
             response = requests.get(url, params={"mailto": "admin@cecan.cl"}, timeout=5)
             if response.status_code == 200:
-                return True, "valid_openalex"
+                data = response.json()
+                metadata = extract_publication_metadata(data)
+                return True, "valid_openalex", metadata
             elif response.status_code == 404:
-                return False, "not_found_openalex"
+                return False, "not_found_openalex", None
             else:
-                return False, f"error_openalex_{response.status_code}"
+                return False, f"error_openalex_{response.status_code}", None
         except Exception:
-            return False, "error_openalex_connection"
+            return False, "error_openalex_connection", None
 
     def check_http(clean_doi):
         """Fallback HTTP check."""
@@ -283,7 +288,7 @@ async def audit_doi_links(
         
         # 1. OpenAlex Check
         if strategy in ["openalex", "hybrid"]:
-            oa_valid, oa_status = check_openalex(clean_doi)
+            oa_valid, oa_status, oa_metadata = check_openalex(clean_doi)
             if oa_valid:
                 return {
                     "pub_id": pub_id,
@@ -291,7 +296,8 @@ async def audit_doi_links(
                     "doi": doi,
                     "status": "valid",
                     "reason": "Verified by OpenAlex",
-                    "source": "openalex"
+                    "source": "openalex",
+                    "metadata": oa_metadata  # Include metadata in result
                 }
             # If hybrid and not found in OA, continue to HTTP
             if strategy == "hybrid" and oa_status == "not_found_openalex":
@@ -362,6 +368,11 @@ async def audit_doi_links(
                 if "openalex" in res.get("source", ""):
                     pub_obj.doi_verification_status = "valid_openalex"
                     results["source_breakdown"]["openalex"] += 1
+                    
+                    # Phase 2: Save Enriched Metrics
+                    if res.get("metadata"):
+                        pub_obj.metrics_data = res["metadata"]
+                        pub_obj.metrics_last_updated = datetime.utcnow()
                 else:
                     pub_obj.doi_verification_status = "valid_http"
                     results["source_breakdown"]["http"] += 1

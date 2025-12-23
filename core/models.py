@@ -3,7 +3,7 @@ SQLAlchemy Models for CECAN Platform
 Database models implementing authentication, compliance, and administrative management.
 """
 
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, Text, ForeignKey, DateTime, Enum as SQLEnum, Float
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, Text, ForeignKey, DateTime, Enum as SQLEnum, Float, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
 from datetime import datetime
@@ -86,6 +86,11 @@ class Publication(Base):
     # DOI Verification (Schema First: Added for Smart Audit)
     doi_verification_status = Column(String(50), default="pending", nullable=False) # pending, valid_openalex, valid_http, broken, repaired
     
+    
+    # External Metrics (OpenAlex, etc)
+    metrics_data = Column(JSON, nullable=True) # Renamed from external_metrics to avoid conflict
+    metrics_last_updated = Column(DateTime, nullable=True)
+
     # Relationships
     researcher_connections = relationship("ResearcherPublication", back_populates="publication")
     chunks = relationship("PublicationChunk", back_populates="publication", cascade="all, delete-orphan")

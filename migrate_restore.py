@@ -7,11 +7,11 @@ def migrate():
     print(f"Checking database at: {DB_PATH}")
     
     # Ensure we use the absolute path if DB_PATH is relative
-    if not os.path.isabs(DB_PATH):
-        # Assuming run from backend/ dir
-        db_path = os.path.abspath(DB_PATH)
-    else:
-        db_path = DB_PATH
+    
+    # Force use of local cecan.db in the same directory as this script (backend/)
+    # This fixes the issue where it connects to an empty DB in the root
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    db_path = os.path.join(current_dir, "cecan.db")
         
     print(f"Target DB: {db_path}")
     
@@ -23,10 +23,25 @@ def migrate():
         ("doi_verification_status", "VARCHAR(50) DEFAULT 'pending'"),
         ("has_funding_ack", "BOOLEAN DEFAULT 0"),
         ("anid_report_status", "VARCHAR(50) DEFAULT 'Pending'"),
-        ("canonical_doi", "VARCHAR(100)")
+        ("canonical_doi", "VARCHAR(100)"),
+        ("metrics_last_updated", "DATETIME"),
+        ("metrics_data", "JSON")
     ]
     
+    
+    # Check for table existence (case-insensitive)
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    tables = {row[0] for row in cursor.fetchall()}
+    print(f"Found tables: {tables}")
+    
     table = "publicaciones"
+    if "Publicaciones" in tables:
+        table = "Publicaciones"
+    elif "publicaciones" not in tables:
+        print(f"❌ Table 'publicaciones' not found in {db_path}")
+        return
+        
+    print(f"Targeting table: {table}")
     
     try:
         # Get existing columns

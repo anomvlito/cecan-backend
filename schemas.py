@@ -142,3 +142,31 @@ class ResearchOpportunityOut(BaseModel):
     class Config:
         from_attributes = True
 
+class PublicationOut(BaseModel):
+    id: int
+    title: str = Field(..., alias="titulo")
+    year: Optional[str] = Field(None, alias="fecha")
+    url: Optional[str] = Field(None, alias="url_origen")
+    doi: Optional[str] = Field(None, alias="canonical_doi")
+    
+    # New Fields
+    metrics_data: Optional[Dict[str, Any]] = None
+    
+    class Config:
+        from_attributes = True
+        populate_by_name = True
+
+class PublicationUpdate(BaseModel):
+    title: Optional[str] = None
+    year: Optional[str] = None
+    url: Optional[str] = None
+    url_origen: Optional[str] = None
+    doi: Optional[str] = None
+    canonical_doi: Optional[str] = None
+    resumen_es: Optional[str] = None
+    resumen_en: Optional[str] = None
+    author_ids: Optional[List[int]] = None
+    
+    class Config:
+        from_attributes = True
+

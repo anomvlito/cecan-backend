@@ -366,8 +366,35 @@ def get_openalex_id(openalex_data: Dict) -> str:
     """
     openalex_id = openalex_data.get("id", "")
     
+    
     if openalex_id.startswith("https://openalex.org/"):
         # Extract ID from URL
         return openalex_id.split("/")[-1]
     
     return openalex_id
+
+
+def extract_publication_metadata(data: Dict) -> Dict:
+    """
+    Extract relevant metrics and metadata from OpenAlex response.
+    
+    Args:
+        data: Raw dictionary from OpenAlex API
+        
+    Returns:
+        Dictionary with structured metrics for DB storage
+    """
+    primary_location = data.get("primary_location", {}) or {}
+    source = primary_location.get("source", {}) or {}
+    
+    return {
+        "cited_by_count": data.get("cited_by_count", 0),
+        "publication_year": data.get("publication_year"),
+        "journal_name": source.get("display_name"),
+        "issn": source.get("issn_l"),
+        "language": data.get("language"),
+        "openalex_id": data.get("id"),
+        "is_oa": primary_location.get("is_oa", False),
+        "oa_status": data.get("open_access", {}).get("oa_status"),
+        "topic": data.get("primary_topic", {}).get("display_name")
+    }

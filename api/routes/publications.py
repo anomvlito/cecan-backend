@@ -13,7 +13,8 @@ from database.session import get_db
 from api.routes.auth import require_editor, get_current_user, User
 from config import DB_PATH
 from services import scraper_service, compliance_service, publication_service
-from core.models import Publication
+from core.models import Publication, ResearcherPublication, AcademicMember
+from schemas import PublicationUpdate
 
 router = APIRouter(prefix="/publications", tags=["Publications"])
 
@@ -21,6 +22,8 @@ router = APIRouter(prefix="/publications", tags=["Publications"])
 @router.get("")
 async def get_publications(current_user: User = Depends(get_current_user)):
     """Get all publications with researcher matches"""
+    import json
+    
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -29,6 +32,13 @@ async def get_publications(current_user: User = Depends(get_current_user)):
     pubs = [dict(row) for row in cursor.fetchall()]
     
     for pub in pubs:
+        # Deserialize JSON fields
+        if pub.get('metrics_data') and isinstance(pub['metrics_data'], str):
+            try:
+                pub['metrics_data'] = json.loads(pub['metrics_data'])
+            except (json.JSONDecodeError, TypeError):
+                pub['metrics_data'] = None
+        
         cursor.execute("""
             SELECT i.nombre, ip.match_score, ip.match_method
             FROM Investigador_Publicacion ip
@@ -555,6 +565,7 @@ async def enrich_publication_with_openalex(
         extract_journal_info,
         get_openalex_id
     )
+    from schemas import PublicationSummarySchema, PublicationUpdatet
     from core.models import PublicationImpact
     
     try:
@@ -632,3 +643,58 @@ async def enrich_publication_with_openalex(
             status_code=500,
             detail=f"Error enriqueciendo publicación: {str(e)}"
         )
+
+@router.patch("/{pub_id}")
+async def update_publication(
+    pub_id: int,
+    pub_update: PublicationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_editor)
+):
+    """
+    Update a publication manually.
+    """
+    pub = db.query(Publication).filter(Publication.id == pub_id).first()
+    if not pub:
+        raise HTTPException(status_code=404, detail="Publication not found")
+        
+    # Manual mapping of fields
+    if pub_update.title is not None:
+        pub.titulo = pub_update.title
+    if pub_update.year is not None:
+        pub.fecha = pub_update.year
+    if pub_update.url is not None:
+        pub.url_origen = pub_update.url
+    if pub_update.canonical_doi is not None:
+        pub.canonical_doi = pub_update.canonical_doi
+    
+    # Also support direct field names if passed
+    if pub_update.resumen_es is not None:
+        pub.resumen_es = pub_update.resumen_es
+    if pub_update.resumen_en is not None:
+        pub.resumen_en = pub_update.resumen_en
+        
+    # Handle author updates
+    if pub_update.author_ids is not None:
+        # Delete existing connections
+        db.query(ResearcherPublication).filter(ResearcherPublication.publicacion_id == pub_id).delete()
+        
+        # Create new connections
+        for member_id in pub_update.author_ids:
+            new_conn = ResearcherPublication(
+                publicacion_id=pub_id,
+                member_id=member_id,
+                match_method="manual",
+                match_score=100
+            )
+            db.add(new_conn)
+        
+    db.commit()
+    db.refresh(pub)
+    
+    return {
+        "status": "success",
+        "message": "Publication updated",
+        "id": pub.id
+    }
+
