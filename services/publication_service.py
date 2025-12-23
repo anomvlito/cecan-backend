@@ -11,6 +11,47 @@ import PyPDF2
 import pdfplumber
 from sqlalchemy.orm import Session
 
+# Tenacity for API retry logic
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_random_exponential,
+    before_sleep_log
+)
+
+def _is_rate_limit_error(exception):
+    """Check if exception is a rate limit error (429 or ResourceExhausted)."""
+    error_message = str(exception).lower()
+    return (
+        '429' in error_message or
+        'resource exhausted' in error_message or
+        'quota' in error_message or
+        'rate limit' in error_message
+    )
+
+@retry(
+    wait=wait_random_exponential(min=1, max=60),
+    stop=stop_after_attempt(5),
+    before_sleep=lambda retry_state: print(
+        f"   ⚠️ Gemini API rate limit hit. Waiting {retry_state.next_action.sleep} seconds before retry {retry_state.attempt_number}/5..."
+    ),
+    reraise=True
+)
+def call_gemini_generate_with_retry(model, prompt: str):
+    """
+    Wrapper for model.generate_content with automatic retry logic.
+    Handles rate limits (429) with exponential backoff.
+    """
+    try:
+        return model.generate_content(prompt)
+    except Exception as e:
+        if _is_rate_limit_error(e):
+            print(f"   ⚠️ Rate limit error detected: {str(e)[:100]}")
+            raise  # Will trigger retry
+        else:
+            print(f"   ❌ Non-retryable Gemini API error: {str(e)[:100]}")
+            raise
+
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     """
@@ -89,14 +130,18 @@ def extract_doi(text: str) -> Optional[str]:
     """
     # DOI regex pattern (case-insensitive)
     # Matches standard DOI format: 10.xxxx/...
-    doi_pattern = r'\b(10\.\d{4,9}/[-._;()/:A-Z0-9]+)\b'
+    # Removed \b boundary check to catch cases like "DOI10.1038/..."
+    # Pattern looks for "10.", 4-9 digits, "/", then valid DOI chars
+    doi_pattern = r'(10\.\d{4,9}/[-._;()/:a-zA-Z0-9]+)'
     
-    # Search in first 5000 characters (typically front matter)
-    search_text = text[:5000]
+    # Search in full text (removed limit to find DOIs in references/end)
+    search_text = text
     
     match = re.search(doi_pattern, search_text, re.IGNORECASE)
     if match:
         doi = match.group(1)
+        # Clean up any trailing punctuation that might have been captured
+        doi = doi.rstrip('.,;)]')
         return f"https://doi.org/{doi}"
     
     return None
@@ -194,8 +239,8 @@ Formato de respuesta:
 Texto del artículo:
 {text_sample}"""
         
-        # Generate summary
-        response = model.generate_content(prompt)
+        # Generate summary (with retry logic)
+        response = call_gemini_generate_with_retry(model, prompt)
         result_text = response.text
         
         # Parse response

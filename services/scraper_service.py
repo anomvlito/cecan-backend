@@ -8,8 +8,14 @@ import json
 import sys
 import os
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from pypdf import PdfReader
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_random_exponential,
+    retry_if_exception_type,
+)
 
 # Add parent directory to path to import backend modules if needed
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -327,6 +333,90 @@ def sync_publications_data():
         
     conn.close()
     print("Publications synchronization complete.")
+
+def _is_rate_limit_error(exception):
+    """Check if exception is a rate limit error (429)."""
+    if isinstance(exception, requests.exceptions.HTTPError):
+        return exception.response.status_code == 429
+    return False
+
+@retry(
+    retry=retry_if_exception_type(requests.exceptions.HTTPError),
+    wait=wait_random_exponential(min=1, max=30),
+    stop=stop_after_attempt(3),
+    retry_error_callback=lambda retry_state: {}, # Return empty dict on final failure
+    reraise=False
+)
+def get_openalex_metrics(orcid: Optional[str] = None, doi: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Fetch metrics from OpenAlex API.
+    Supports ORCID for authors and DOI for publications.
+    """
+    base_url = "https://api.openalex.org"
+    params = {"mailto": "admin@cecan.cl"} # OpenAlex polite pool
+    
+    try:
+        if doi:
+            # Format DOI: remove url prefix if present
+            clean_doi = doi.split('doi.org/')[-1]
+            url = f"{base_url}/works/https://doi.org/{clean_doi}"
+            response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            return {
+                "citation_count": data.get("cited_by_count", 0),
+                "source": "openalex"
+            }
+            
+        elif orcid:
+            # Format ORCID: ensure it's just the ID or full URL
+            clean_orcid = orcid.split('orcid.org/')[-1]
+            url = f"{base_url}/authors/https://orcid.org/{clean_orcid}"
+            response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            return {
+                "h_index": data.get("summary_stats", {}).get("h_index", 0),
+                "citation_count": data.get("cited_by_count", 0),
+                "i10_index": data.get("summary_stats", {}).get("i10_index", 0),
+                "source": "openalex"
+            }
+    except Exception as e:
+        if _is_rate_limit_error(e):
+            raise # Trigger tenacity retry
+        print(f"Error fetching from OpenAlex: {e}")
+    return {}
+
+@retry(
+    retry=retry_if_exception_type(requests.exceptions.HTTPError),
+    wait=wait_random_exponential(min=1, max=30),
+    stop=stop_after_attempt(3),
+    retry_error_callback=lambda retry_state: {},
+    reraise=False
+)
+def get_semantic_scholar_metrics(doi: str) -> Dict[str, Any]:
+    """
+    Fetch metrics from Semantic Scholar API using DOI.
+    """
+    base_url = "https://api.semanticscholar.org/graph/v1"
+    clean_doi = doi.split('doi.org/')[-1]
+    url = f"{base_url}/work/DOI:{clean_doi}"
+    params = {"fields": "citationCount,influentialCitationCount"}
+    
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return {
+            "citation_count": data.get("citationCount", 0),
+            "influential_citations": data.get("influentialCitationCount", 0),
+            "source": "semanticscholar"
+        }
+    except Exception as e:
+        if _is_rate_limit_error(e):
+            raise
+        print(f"Error fetching from Semantic Scholar: {e}")
+    return {}
 
 if __name__ == "__main__":
     # sync_staff_data()

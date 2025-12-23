@@ -11,7 +11,8 @@ from . import (
     files,
     reports,
     public,
-    catalogs
+    catalogs,
+    external
 )
 
 __all__ = [
@@ -25,5 +26,6 @@ __all__ = [
     'files',
     'reports',
     'public',
-    'catalogs'
+    'catalogs',
+    'external'
 ]

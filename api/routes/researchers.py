@@ -1,35 +1,84 @@
-"""
-Researcher Routes for CECAN Platform
-API endpoints for staff/researchers management
-"""
-
-from fastapi import APIRouter, Depends
-import sqlite3
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from sqlalchemy import func
 import threading
+from typing import List
 
 from api.routes.auth import require_editor, get_current_user, User
-from config import DB_PATH
+from database.session import get_db
+from core.models import AcademicMember, ResearcherDetails, ProjectResearcher, ResearcherPublication
 from services import scraper_service, matching_service
 
 router = APIRouter(prefix="/researchers", tags=["Researchers"])
 
 
 @router.get("")
-async def get_researchers(current_user: User = Depends(get_current_user)):
+async def get_researchers(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     """Get all researchers/staff members"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    # Query AcademicMember joined with ResearcherDetails
+    researchers = (
+        db.query(AcademicMember, ResearcherDetails)
+        .join(ResearcherDetails, AcademicMember.id == ResearcherDetails.member_id)
+        .filter(AcademicMember.member_type == "researcher")
+        .all()
+    )
     
-    cursor.execute("""
-        SELECT id, nombre, cargo_oficial, url_foto, active_projects,
-               citaciones_totales, indice_h, publicaciones_recientes
-        FROM Investigadores
-    """)
-    rows = cursor.fetchall()
-    conn.close()
+    result = []
+    for member, details in researchers:
+        # Count active projects
+        active_projects_count = (
+            db.query(func.count(ProjectResearcher.id))
+            .filter(ProjectResearcher.member_id == member.id)
+            .scalar()
+        )
+        
+        # Count recent publications
+        recent_pubs_count = (
+            db.query(func.count(ResearcherPublication.id))
+            .filter(ResearcherPublication.member_id == member.id)
+            .scalar()
+        )
+        
+        result.append({
+            "id": member.id,
+            "nombre": member.full_name,
+            "cargo_oficial": details.category,
+            "url_foto": details.url_foto,
+            "active_projects": active_projects_count,
+            "citaciones_totales": details.citaciones_totales,
+            "indice_h": details.indice_h,
+            "works_count": details.works_count,
+            "i10_index": details.i10_index,
+            "publicaciones_recientes": recent_pubs_count,
+            "is_auditable": details.is_auditable,
+            "last_openalex_sync": details.last_openalex_sync
+        })
     
-    return [dict(row) for row in rows]
+    return result
+
+
+@router.post("/sync-openalex")
+async def sync_openalex_metrics(
+    force_refresh: bool = False,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_editor)
+):
+    """
+    Sincroniza métricas de OpenAlex para investigadores con ORCID.
+    
+    - **force_refresh**: Si es True, actualiza todos los investigadores.
+                        Si es False, solo actualiza los que nunca se sincronizaron
+                        o hace más de 30 días.
+    
+    Requiere rol Editor o superior.
+    """
+    from services.openalex_service import sync_all_researchers
+    
+    result = sync_all_researchers(db, force_refresh)
+    return result
 
 
 @router.post("/sync")

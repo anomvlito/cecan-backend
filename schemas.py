@@ -26,7 +26,11 @@ class ResearcherDetailsBase(BaseModel):
     formalized_exit: Optional[bool] = False
     citaciones_totales: Optional[int] = None
     indice_h: Optional[int] = None
+    works_count: Optional[int] = None  # OpenAlex: Total publications
+    i10_index: Optional[int] = None    # OpenAlex: Publications with ≥10 citations
     url_foto: Optional[str] = None
+    is_auditable: bool = True
+    last_openalex_sync: Optional[datetime] = None
 
 class StudentDetailsBase(BaseModel):
     tutor_id: Optional[int] = None
@@ -118,7 +122,23 @@ class SankeyLink(BaseModel):
     target: str
     value: int
 
+
 class SankeyData(BaseModel):
     nodes: List[SankeyNode]
     links: List[SankeyLink]
+
+class ResearchOpportunityOut(BaseModel):
+    id: int
+    target_wp_id: int
+    target_node_id: int
+    wp_name: str
+    node_name: str
+    gap_description: str
+    suggested_line: Optional[str] = None
+    impact_potential: Optional[float] = 0.0
+    status: str
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
 

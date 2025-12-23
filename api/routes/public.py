@@ -1,11 +1,12 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Optional
-import sqlite3
-from config import DB_PATH
-from config import DB_PATH
-from database.legacy_wrapper import CecanDB
+from sqlalchemy.orm import Session, joinedload
+
+from database.session import get_db
+from core.models import AcademicMember, ResearcherDetails, Project, Publication, ResearcherPublication, WorkPackage
 from schemas import PublicationSummarySchema, ResearcherSummarySchema
+from services.graph_service import build_graph_data
 
 router = APIRouter(prefix="/public", tags=["Public"])
 
@@ -30,169 +31,144 @@ class PublicPublicationOut(BaseModel):
     year: Optional[str] = None
     url: Optional[str] = None
     doi: Optional[str] = None
+    canonical_doi: Optional[str] = None  # Added for frontend compatibility
+    doi_verification_status: Optional[str] = None # pending, valid_openalex, valid_http, broken, repaired
     has_funding_ack: bool = False
     anid_report_status: str = "Pending"
     authors: List[ResearcherSummarySchema] = []
 
+
 # --- Endpoints ---
 
 @router.get("/researchers", response_model=List[PublicResearcherOut])
-async def get_public_researchers():
+async def get_public_researchers(db: Session = Depends(get_db)):
     """
     Get public list of researchers with sanitized fields.
     """
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    
     try:
-        # Join AcademicMember, ResearcherDetails, and WorkPackage
-        query = """
-            SELECT 
-                am.id, 
-                am.full_name, 
-                rd.url_foto as photo_url, 
-                rd.category, 
-                wp.nombre as wp_name,
-                rd.indice_h as h_index,
-                rd.citaciones_totales as total_citations
-            FROM academic_members am
-            LEFT JOIN researcher_details rd ON am.id = rd.member_id
-            LEFT JOIN wps wp ON am.wp_id = wp.id
-            WHERE am.member_type = 'researcher' AND am.is_active = 1
-        """
-        cursor.execute(query)
-        rows = cursor.fetchall()
+        # Fetch researchers with details and WP
+        researchers = (
+            db.query(AcademicMember)
+            .options(
+                joinedload(AcademicMember.researcher_details),
+                joinedload(AcademicMember.wp)
+            )
+            .filter(AcademicMember.member_type == 'researcher')
+            .filter(AcademicMember.is_active == True)
+            .all()
+        )
         
-        researchers_map = {}
-        for row in rows:
-            researchers_map[row["id"]] = {
-                "id": row["id"],
-                "full_name": row["full_name"],
-                "photo_url": row["photo_url"],
-                "category": row["category"],
-                "wp_name": row["wp_name"],
-                "metrics": {
-                    "h_index": row["h_index"],
-                    "total_citations": row["total_citations"]
-                },
-                "publications": []
-            }
+        results = []
+        for member in researchers:
+            details = member.researcher_details
+            wp = member.wp
             
-        if researchers_map:
-            researcher_ids = list(researchers_map.keys())
-            placeholders = ",".join("?" * len(researcher_ids))
-            
-            pub_query = f"""
-                SELECT 
-                    ip.member_id,
-                    p.id,
-                    p.titulo as title,
-                    p.fecha as year,
-                    p.url_origen as url,
-                    p.has_funding_ack,
-                    p.anid_report_status
-                FROM publicaciones p
-                JOIN investigador_publicacion ip ON p.id = ip.publicacion_id
-                WHERE ip.member_id IN ({placeholders})
-            """
-            cursor.execute(pub_query, researcher_ids)
-            pub_rows = cursor.fetchall()
-            
-            for pub in pub_rows:
-                if pub["member_id"] in researchers_map:
-                    researchers_map[pub["member_id"]]["publications"].append({
-                        "id": pub["id"],
-                        "title": pub["title"],
-                        "year": pub["year"],
-                        "url": pub["url"],
-                        "has_funding_ack": bool(pub["has_funding_ack"]) if pub["has_funding_ack"] is not None else False,
-                        "anid_report_status": pub["anid_report_status"] or "Pending"
+            # Fetch publications
+            pubs = []
+            if member.publication_connections:
+                for rp in member.publication_connections:
+                    pub = rp.publication
+                    pubs.append({
+                        "id": pub.id,
+                        "title": pub.titulo,
+                        "year": pub.fecha,
+                        "url": pub.url_origen,
+                        "doi": pub.canonical_doi, # Map to standardized field
+                        "canonical_doi": pub.canonical_doi, # Map to field expected by table
+                        "has_funding_ack": pub.has_funding_ack,
+                        "anid_report_status": pub.anid_report_status or "Pending"
                     })
+            
+            results.append({
+                "id": member.id,
+                "full_name": member.full_name,
+                "photo_url": details.url_foto if details else None,
+                "category": details.category if details else None,
+                "wp_name": wp.nombre if wp else None,
+                "metrics": {
+                    "h_index": details.indice_h if details else None,
+                    "total_citations": details.citaciones_totales if details else None
+                },
+                "publications": pubs
+            })
+            
+        return results
         
-        return list(researchers_map.values())
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching researchers: {str(e)}")
-    finally:
-        conn.close()
+
+
+import logging
+# Ensure logger is configured
+logger = logging.getLogger(__name__)
 
 @router.get("/publications", response_model=List[PublicPublicationOut])
-async def get_public_publications():
+async def get_public_publications(db: Session = Depends(get_db)):
     """
     Get public list of publications with authors.
+    Optimized to avoid N+1 queries and handle missing schema columns safely.
     """
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    
     try:
-        # Fetch all publications
-        query = """
-            SELECT 
-                id, 
-                titulo as title, 
-                fecha as year, 
-                url_origen as url,
-                has_funding_ack,
-                anid_report_status
-            FROM publicaciones
-        """
-        cursor.execute(query)
-        rows = cursor.fetchall()
+        # 1. Eager loading: Fetch publication, connection, and member in one query
+        publications = (
+            db.query(Publication)
+            .options(
+                joinedload(Publication.researcher_connections)
+                .joinedload(ResearcherPublication.member)
+                .joinedload(AcademicMember.researcher_details)
+            )
+            .all()
+        )
         
-        publications_map = {}
-        for row in rows:
-            publications_map[row["id"]] = {
-                "id": row["id"],
-                "title": row["title"],
-                "year": row["year"],
-                "url": row["url"],
-                "has_funding_ack": bool(row["has_funding_ack"]) if row["has_funding_ack"] is not None else False,
-                "anid_report_status": row["anid_report_status"] or "Pending",
-                "authors": []
-            }
-            
-        # Fetch all author connections
-        auth_query = """
-            SELECT 
-                ip.publicacion_id,
-                am.id,
-                am.full_name,
-                rd.url_foto as avatar_url
-            FROM academic_members am
-            JOIN investigador_publicacion ip ON am.id = ip.member_id
-            LEFT JOIN researcher_details rd ON am.id = rd.member_id
-            WHERE am.member_type = 'researcher'
-        """
-        cursor.execute(auth_query)
-        auth_rows = cursor.fetchall()
-        
-        for auth in auth_rows:
-            if auth["publicacion_id"] in publications_map:
-                publications_map[auth["publicacion_id"]]["authors"].append({
-                    "id": auth["id"],
-                    "full_name": auth["full_name"],
-                    "avatar_url": auth["avatar_url"]
+        results = []
+        for pub in publications:
+            authors = []
+            # Iterate over connections already loaded in memory
+            for rp in pub.researcher_connections:
+                if not rp.member: continue # Skip if data is corrupt
+                
+                member = rp.member
+                details = member.researcher_details
+                
+                authors.append({
+                    "id": member.id,
+                    "full_name": member.full_name,
+                    # Safe navigation to avoid error if details is None
+                    "avatar_url": details.url_foto if details else None
                 })
+            
+            # 2. Use getattr to avoid crash if DB is missing new columns
+            results.append({
+                "id": pub.id,
+                "title": pub.titulo,
+                "year": pub.fecha,
+                "url": pub.url_origen,
+                "doi": getattr(pub, "canonical_doi", None), 
+                "canonical_doi": getattr(pub, "canonical_doi", None),
+                "doi_verification_status": getattr(pub, "doi_verification_status", "pending"),
+                "has_funding_ack": getattr(pub, "has_funding_ack", False),
+                "anid_report_status": getattr(pub, "anid_report_status", "Pending"),
+                "authors": authors
+            })
+            
+        return results
         
-        return list(publications_map.values())
     except Exception as e:
+        # Log real error to server console
+        logger.error(f"CRITICAL ERROR in /public/publications: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching publications: {str(e)}")
-    finally:
-        conn.close()
+
 
 @router.get("/graph")
-async def get_public_graph():
+async def get_public_graph(db: Session = Depends(get_db)):
     """
     Get simplified graph data for public visualization.
     """
-    db = CecanDB()
     try:
-        data = db.get_graph_data()
+        data = build_graph_data(db)
         # We could filter sensitive data here if needed, but get_graph_data seems already safe enough for now
         # based on the legacy implementation.
         return data
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching graph data: {str(e)}")
-    finally:
-        db.close()

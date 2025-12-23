@@ -171,7 +171,7 @@ backend/
 ├── database/
 │   ├── init.py           # Script de creación de tablas
 │   ├── seed.py           # Script de creación de usuario admin
-│   └── legacy_wrapper.py # Compatibilidad con grafo legacy
+│   └── session.py        # Gestión de sesiones SQLAlchemy
 ├── migrations/           # Scripts de migración de datos
 ├── services/             # Lógica de negocio (Auth, RAG, Scraper)
 ├── scripts/              # Scripts de utilidad (Verificación API)

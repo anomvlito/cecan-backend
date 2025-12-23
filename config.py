@@ -35,3 +35,16 @@ CORS_ORIGINS = [
 APP_TITLE = "CECAN Platform API"
 APP_VERSION = "3.1.0"
 APP_DESCRIPTION = "Professional SaaS platform for cancer research management"
+
+# Standardized Paths
+UPLOAD_DIR = BASE_DIR / "uploads"
+DATA_DIR = BASE_DIR / "data"
+VECTORSTORE_DIR = DATA_DIR / "vectorstore"
+
+# Ensure directories exist
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# OpenAlex API Configuration
+OPENALEX_CONTACT_EMAIL = os.getenv("OPENALEX_EMAIL", "contacto@cecan.cl")
+OPENALEX_SYNC_THRESHOLD_DAYS = 30  # Only sync if last sync was >30 days ago

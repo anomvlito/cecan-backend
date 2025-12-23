@@ -7,8 +7,8 @@ from api.routes.auth import require_editor, User
 
 router = APIRouter(prefix="/files", tags=["Files"])
 
-UPLOAD_DIR = "backend/uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+from config import UPLOAD_DIR
+# os.makedirs(UPLOAD_DIR, exist_ok=True) # Managed in config.py
 
 @router.post("/upload")
 async def upload_file(

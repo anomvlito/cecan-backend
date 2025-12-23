@@ -4,8 +4,12 @@ from dotenv import load_dotenv
 load_dotenv()
 from collections.abc import Iterable
 import sys
+import threading
 
-from database.legacy_wrapper import CecanDB
+from sqlalchemy.orm import Session
+from sqlalchemy import or_, func
+from database.session import get_session
+from core.models import Project, WorkPackage, AcademicMember, Node
 from services.rag_service import get_semantic_engine
 
 
@@ -21,9 +25,6 @@ class CecanAgent:
             raise ValueError("GOOGLE_API_KEY not found. Please set it in your environment variables or pass it to the constructor.")
 
         self.genai.configure(api_key=api_key)
-        
-        self.db = CecanDB()
-        self.db.connect()
         
         # Initialize Semantic Search Engine (uses singleton)
         try:
@@ -81,7 +82,35 @@ class CecanAgent:
     def search_projects(self, keyword: str):
         """Busca proyectos por título, AcademicMember, nodo o WP (coincidencia exacta o parcial de texto)."""
         print(f"   [Tool] Buscando proyectos (SQL) con: '{keyword}'...")
-        return self.db.search_projects(keyword)
+        session = get_session()
+        try:
+            # Simplify search: search in Project title
+            # In a real scenario, this would be more complex joins.
+            # Mirroring legacy wrapper logic: searches in title, researcher name, wp name, node name
+            
+            projects = (
+                session.query(Project)
+                .outerjoin(WorkPackage, Project.wp_id == WorkPackage.id)
+                .filter(
+                    or_(
+                        Project.titulo.ilike(f"%{keyword}%"),
+                        WorkPackage.nombre.ilike(f"%{keyword}%")
+                        # Add other fields if needed, simplified for ORM
+                    )
+                )
+                .all()
+            )
+            
+            results = []
+            for p in projects:
+                results.append({
+                    "id": p.id,
+                    "title": p.titulo,
+                    "wp": p.wp.nombre if p.wp else None
+                })
+            return results
+        finally:
+            session.close()
 
     def conceptual_search(self, query: str):
         """Busca proyectos conceptualmente relacionados usando inteligencia artificial (búsqueda semántica)."""
@@ -103,14 +132,39 @@ class CecanAgent:
     def get_project_details(self, project_id: int):
         """Obtiene detalles completos de un proyecto por su ID, incluyendo AcademicMemberes y nodos."""
         print(f"   [Tool] Obteniendo detalles del proyecto ID: {project_id}...")
-        return self.db.get_project_details(project_id)
+        session = get_session()
+        try:
+            p = session.query(Project).filter(Project.id == project_id).first()
+            if not p:
+                return f"Proyecto {project_id} no encontrado."
+            
+            details = {
+                "id": p.id,
+                "titulo": p.titulo,
+                "wp": p.wp.nombre if p.wp else "Sin WP",
+                "descripcion": getattr(p, 'descripcion', "Sin descripción"), # Assuming description exists or not?
+                "estado": getattr(p, 'estado', "Desconocido"),
+                "fecha_inicio": getattr(p, 'fecha_inicio', None),
+                "fecha_termino": getattr(p, 'fecha_termino', None),
+                "investigadores": [
+                    {"nombre": pr.member.full_name, "rol": pr.rol} 
+                    for pr in p.researcher_connections
+                ],
+                "nodos": [pn.node.nombre for pn in p.node_connections]
+            }
+            return details
+        finally:
+            session.close()
         
     def list_all_wps(self):
         """Lista todos los Working Packages (WPs) disponibles."""
         print(f"   [Tool] Listando WPs...")
-        cursor = self.db.conn.cursor()
-        cursor.execute("SELECT id, nombre FROM WPs")
-        return [dict(row) for row in cursor.fetchall()]
+        session = get_session()
+        try:
+            wps = session.query(WorkPackage).all()
+            return [{"id": wp.id, "nombre": wp.nombre} for wp in wps]
+        finally:
+            session.close()
 
     def send_message(self, message):
         try:
@@ -119,6 +173,84 @@ class CecanAgent:
         except Exception as e:
             return f"Ocurrió un error al procesar tu solicitud: {str(e)}"
 
+    def detect_research_gaps(self, db: Session):
+        """
+        Strategic analysis: crosses WPs with Nodes to detect gaps (no projects/pubs).
+        Saves findings to ResearchOpportunity table.
+        """
+        from core.models import ResearchOpportunity, ProjectNode, Project, Node, WorkPackage
+        
+        print("   [IA] Iniciando análisis de brechas estratégicas...")
+        
+        wps = db.query(WorkPackage).all()
+        nodes = db.query(Node).all()
+        
+        gaps_found = 0
+        
+        for wp in wps:
+            for node in nodes:
+                # Check coverage: Is there any project connecting this WP and this Node?
+                exists = db.query(Project).join(ProjectNode).filter(
+                    Project.wp_id == wp.id,
+                    ProjectNode.nodo_id == node.id
+                ).first()
+                
+                if not exists:
+                    # Potential Gap! Let's ask Gemini to frame it
+                    prompt = f"""
+                    Como Estratega del CECAN, analiza esta brecha de investigación:
+                    - Work Package: {wp.nombre}
+                    - Nodo Temático: {node.nombre}
+                    
+                    No hay proyectos activos que conecten este grupo de trabajo con este tipo de cáncer/tema.
+                    Genera una breve descripción del 'gap' y una 'línea de investigación sugerida' que sea innovadora.
+                    
+                    Formato:
+                    GAP: <descripción>
+                    LINEA: <sugerencia>
+                    """
+                    
+                    try:
+                        response = self.model.generate_content(prompt)
+                        text = response.text
+                        
+                        # Simple parsing
+                        gap_desc = ""
+                        suggested = ""
+                        
+                        if "GAP:" in text and "LINEA:" in text:
+                            parts = text.split("LINEA:")
+                            gap_desc = parts[0].replace("GAP:", "").strip()
+                            suggested = parts[1].strip()
+                        else:
+                            gap_desc = f"Falta de integración entre {wp.nombre} y {node.nombre}."
+                            suggested = text.strip()
+
+                        # Persistence (Upsert logical)
+                        existing_gap = db.query(ResearchOpportunity).filter(
+                            ResearchOpportunity.target_wp_id == wp.id,
+                            ResearchOpportunity.target_node_id == node.id
+                        ).first()
+                        
+                        if not existing_gap:
+                            new_op = ResearchOpportunity(
+                                target_wp_id=wp.id,
+                                target_node_id=node.id,
+                                gap_description=gap_desc,
+                                suggested_line=suggested,
+                                impact_potential=0.5 # Default
+                            )
+                            db.add(new_op)
+                            gaps_found += 1
+                        
+                    except Exception as e:
+                        print(f"      [Error] Gemini falló para {wp.nombre}/{node.nombre}: {e}")
+        
+        db.commit()
+        print(f"   [IA] Análisis completado. {gaps_found} nuevas oportunidades detectadas.")
+        return {"status": "success", "gaps_detected": gaps_found}
+
     def close(self):
-        self.db.close()
+        # self.db.close() # Removed
         # Note: Do NOT close semantic_engine here - it's a shared singleton
+        pass
