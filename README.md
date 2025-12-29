@@ -29,12 +29,14 @@ cd backend
 ### 3️⃣ Crear un Entorno Virtual (Recomendado)
 
 **Windows (PowerShell o CMD):**
+
 ```bash
 python -m venv venv
 venv\Scripts\activate
 ```
 
 **macOS/Linux:**
+
 ```bash
 python3 -m venv venv
 source venv/bin/activate
@@ -51,6 +53,7 @@ pip install -r requirements.txt
 
 > [!IMPORTANT]
 > Si encuentras errores con `bcrypt`, asegúrate de que se instale la versión específica:
+>
 > ```bash
 > pip install bcrypt==4.0.1
 > ```
@@ -77,6 +80,7 @@ CORS_ORIGINS=["http://localhost:3000", "http://localhost:8000"]
 
 > [!TIP]
 > Para generar un `SECRET_KEY` seguro, puedes usar Python:
+>
 > ```bash
 > python -c "import secrets; print(secrets.token_urlsafe(32))"
 > ```
@@ -92,6 +96,7 @@ python -m database.init
 ```
 
 **macOS/Linux:**
+
 ```bash
 python3 -m database.init
 ```
@@ -107,11 +112,13 @@ python -m database.seed
 ```
 
 **macOS/Linux:**
+
 ```bash
 python3 -m database.seed
 ```
 
 **Credenciales por defecto:**
+
 - **Email:** `admin@cecan.cl`
 - **Contraseña:** `admin123`
 
@@ -123,19 +130,22 @@ python3 -m database.seed
 ¡Llegó el momento de levantar el servidor! Ejecuta el siguiente comando:
 
 **Para Desarrollo (con recarga automática):**
+
 ```bash
 uvicorn main:app --reload
 ```
 
 **macOS/Linux:**
+
 ```bash
 python3 -m uvicorn main:app --reload
 ```
 
-**¿Qué hace el flag `--reload`?**  
+**¿Qué hace el flag `--reload`?**
 Activa la recarga en caliente (hot-reload): cada vez que guardes cambios en el código, el servidor se reiniciará automáticamente. **Perfecto para desarrollo, NO usar en producción.**
 
 **Para Producción (sin recarga automática):**
+
 ```bash
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
@@ -198,10 +208,12 @@ SQLite es una base de datos **embebida** que almacena toda la información en un
 El esquema está diseñado para soportar la gestión académica y el cumplimiento normativo.
 
 #### 1. Usuarios y Autenticación
+
 - **`users`**: Usuarios del sistema (Admin, Editor, Viewer).
   - `id`, `email`, `hashed_password`, `role`, `is_active`.
 
 #### 2. Miembros Académicos (Core)
+
 - **`academic_members`**: Tabla central para todas las personas (Investigadores, Estudiantes, Staff).
   - `id`, `full_name`, `rut`, `email`, `member_type` (researcher/student/staff).
   - `wp_id` (FK -> `wps`): Working Package principal.
@@ -211,6 +223,7 @@ El esquema está diseñado para soportar la gestión académica y el cumplimient
   - `member_id` (FK -> `academic_members`), `tutor_id` (FK), `thesis_title`, `program`.
 
 #### 3. Publicaciones y Compliance
+
 - **`publicaciones`**: Papers y artículos científicos.
   - `id`, `titulo`, `doi`, `fecha`, `journal`.
   - **Auditoría**: `has_valid_affiliation`, `has_funding_ack`, `anid_report_status`.
@@ -218,6 +231,7 @@ El esquema está diseñado para soportar la gestión académica y el cumplimient
   - `investigador_id`, `publicacion_id`, `match_score`, `match_method` (manual/fuzzy).
 
 #### 4. Estructura Organizacional (Legacy & New)
+
 - **`wps`**: Working Packages (Líneas de investigación).
   - `id`, `nombre`.
 - **`proyectos`**: Proyectos de investigación asociados a WPs.
@@ -230,10 +244,10 @@ erDiagram
     User ||--o{ Action : performs
     WorkPackage ||--|{ AcademicMember : has
     WorkPackage ||--|{ Project : contains
-    
+  
     AcademicMember ||--|| ResearcherDetails : extends
     AcademicMember ||--|| StudentDetails : extends
-    
+  
     AcademicMember }|--|{ Publication : authors
     Publication ||--|| ComplianceStatus : has
 ```
@@ -241,6 +255,7 @@ erDiagram
 ### Sistema Híbrido (Legacy vs Modern)
 
 El backend mantiene compatibilidad con datos históricos:
+
 - **Tablas Modernas (SQLAlchemy):** `users`, `academic_members`, `compliance_status`. Usadas para la gestión diaria y la API nueva.
 - **Tablas Legacy (SQLite Raw):** `Investigadores` (antigua), `Nodos`, `Proyectos`. Usadas principalmente para la visualización del **Grafo de Red** (`/api/public/graph`).
 - **Sincronización:** Existen scripts (`migrations/`) para mover datos del mundo Legacy al Moderno.
@@ -250,21 +265,26 @@ El backend mantiene compatibilidad con datos históricos:
 ## 🔌 Endpoints Principales (API Reference)
 
 ### 🔐 Autenticación (`/api/auth`)
+
 - `POST /login`: Obtener token de acceso.
 - `GET /me`: Obtener perfil del usuario actual.
 
 ### 🌍 Públicos (`/api/public`)
+
 - `GET /researchers`: Lista de investigadores para el sitio web (datos sanitizados).
 - `GET /graph`: Datos del grafo de red (nodos y aristas) para visualización.
 
 ### 📂 Catálogos (`/api/catalogs`)
+
 - `GET /working-packages`: Lista de WPs con sus colores asignados.
 
 ### 📊 Reportes (`/api/reports`)
+
 - `GET /compliance/export`: Descarga reporte Excel de cumplimiento (Requiere rol Editor).
 - `GET /summary`: Resumen de métricas por WP.
 
 ### 🤖 RAG & IA (`/api/rag`)
+
 - `POST /chat`: Conversar con el agente inteligente.
 - `GET /stats`: Estadísticas del sistema de conocimiento.
 
@@ -275,23 +295,27 @@ El backend mantiene compatibilidad con datos históricos:
 El backend incluye una suite de scripts avanzados para la gestión y enriquecimiento de datos en `backend/scripts/`:
 
 ### 📚 Gestión de Publicaciones
+
 - `sync_publications.py`: Sincroniza publicaciones desde la web.
 - `enrich_final_regex.py`: **[CRÍTICO]** Extrae metadatos (autores, fecha, resumen) de la web usando regex avanzado.
 - `generate_urls.py`: Genera URLs canónicas para las publicaciones.
 - `find_duplicates.py` & `clean_database.py`: Detecta y elimina publicaciones duplicadas.
 
 ### 🔗 Matching de Investigadores
+
 - `add_name_variations.py`: Genera variaciones de nombres (ej: "Juan Pérez" -> "J. Pérez") para mejorar el matching.
 - `fix_problematic_names.py`: Corrige nombres concatenados erróneos.
 - `run_matching_improved.py`: **[CRÍTICO]** Vincula investigadores con publicaciones usando algoritmos fuzzy y variaciones de nombres.
 - `matching_reports.py`: Genera reportes detallados de productividad y colaboración.
 
 ### 🆔 Integración ORCID
+
 - `setup_and_extract_orcids.py`: Extrae ORCIDs desde los PDFs locales.
 - `improve_orcid_extraction.py`: Extracción profunda de ORCIDs (links + texto plano).
 - `match_orcids_with_api.py`: Valida ORCIDs con la API oficial y los asigna a los investigadores.
 
 ### ✅ Auditoría y Compliance
+
 - `audit_compliance.py`: Verifica automáticamente si las publicaciones mencionan a "CECAN" o "FONDAP" en sus agradecimientos.
 
 ---
@@ -300,34 +324,35 @@ El backend incluye una suite de scripts avanzados para la gestión y enriquecimi
 
 Para actualizar completamente la base de datos, sigue este orden:
 
-1. **Sincronización:**  
+1. **Sincronización:**
+
    ```bash
    python scripts/sync_publications.py
    ```
+2. **Enriquecimiento:**
 
-2. **Enriquecimiento:**  
    ```bash
    python scripts/enrich_final_regex.py
    ```
+3. **Limpieza:**
 
-3. **Limpieza:**  
    ```bash
    python scripts/clean_database.py
    ```
+4. **Matching:**
 
-4. **Matching:**  
    ```bash
    python scripts/add_name_variations.py
    python scripts/run_matching_improved.py
    ```
+5. **ORCID:**
 
-5. **ORCID:**  
    ```bash
    python scripts/improve_orcid_extraction.py
    python scripts/match_orcids_with_api.py
    ```
+6. **Auditoría:**
 
-6. **Auditoría:**  
    ```bash
    python scripts/audit_compliance.py
    ```
@@ -344,6 +369,7 @@ Para actualizar completamente la base de datos, sigue este orden:
 **Causa:** Estás ejecutando el comando desde el directorio incorrecto o no estás usando el formato de módulo correcto.
 
 **Solución:**
+
 - Asegúrate de estar en la carpeta `backend/` cuando ejecutes los comandos.
 - Usa `python -m` para scripts que son módulos (como `database.init`).
 
@@ -359,6 +385,7 @@ python -m database.init
 **Causa:** Versión incompatible de `bcrypt`.
 
 **Solución:**
+
 ```bash
 pip install bcrypt==4.0.1
 ```
@@ -370,6 +397,7 @@ pip install bcrypt==4.0.1
 **Causa:** No se ejecutaron correctamente los scripts de inicialización.
 
 **Solución:**
+
 1. Elimina el archivo `cecan.db` si existe.
 2. Vuelve a ejecutar:
    ```bash
@@ -384,6 +412,7 @@ pip install bcrypt==4.0.1
 **Causa:** Uvicorn no está instalado o no está en el PATH del entorno virtual.
 
 **Solución:**
+
 - Si estás dentro del entorno virtual (`venv` activo), intenta:
   ```bash
   pip install uvicorn[standard]
@@ -400,6 +429,7 @@ pip install bcrypt==4.0.1
 **Causa:** En Windows, el comando es `python`, no `python3`.
 
 **Solución:** Usa `python` en lugar de `python3`:
+
 ```bash
 python -m database.init
 ```
@@ -411,6 +441,7 @@ python -m database.init
 **Causa:** Otro proceso está usando el puerto 8000.
 
 **Solución:**
+
 - **Opción 1:** Detén el proceso que usa el puerto.
 - **Opción 2:** Usa otro puerto:
   ```bash
