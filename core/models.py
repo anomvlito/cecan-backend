@@ -3,7 +3,7 @@ SQLAlchemy Models for CECAN Platform
 Database models implementing authentication, compliance, and administrative management.
 """
 
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, Text, ForeignKey, DateTime, Enum as SQLEnum, Float
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, Text, ForeignKey, DateTime, Enum as SQLEnum, Float, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
 from datetime import datetime
@@ -63,6 +63,7 @@ class Publication(Base):
     autores = Column(Text, nullable=True)
     categoria = Column(String(100), nullable=True)
     url_origen = Column(Text, nullable=True)
+    canonical_doi = Column(String(100), unique=True, nullable=True, index=True)  # Normalized DOI
     path_pdf_local = Column(Text, nullable=True)
     contenido_texto = Column(Text, nullable=True)
     
@@ -76,15 +77,24 @@ class Publication(Base):
     # COMPLIANCE AUDIT FIELDS (El Robot)
     has_valid_affiliation = Column(Boolean, default=False, nullable=False)
     has_funding_ack = Column(Boolean, default=False, nullable=False)
-    anid_report_status = Column(SQLEnum(ComplianceStatus), default=ComplianceStatus.ERROR, nullable=False)
+    anid_report_status = Column(String(50), default="Pending", nullable=False)
     
     # Audit metadata
     last_audit_date = Column(DateTime, nullable=True)
     audit_notes = Column(Text, nullable=True)  # Automated observations
     
+    # DOI Verification (Schema First: Added for Smart Audit)
+    doi_verification_status = Column(String(50), default="pending", nullable=False) # pending, valid_openalex, valid_http, broken, repaired
+    
+    
+    # External Metrics (OpenAlex, etc)
+    metrics_data = Column(JSON, nullable=True) # Renamed from external_metrics to avoid conflict
+    metrics_last_updated = Column(DateTime, nullable=True)
+
     # Relationships
     researcher_connections = relationship("ResearcherPublication", back_populates="publication")
     chunks = relationship("PublicationChunk", back_populates="publication", cascade="all, delete-orphan")
+    impact_metrics = relationship("PublicationImpact", uselist=False, back_populates="publication", cascade="all, delete-orphan")
 
 
 # ===========================
@@ -124,6 +134,20 @@ class AcademicMember(Base):
     # Connections (Polymorphic-like)
     publication_connections = relationship("ResearcherPublication", back_populates="member")
     project_connections = relationship("ProjectResearcher", back_populates="member")
+    
+    # Many-to-Many with WPs
+    wps = relationship("WorkPackage", secondary="member_wps", back_populates="members_list")
+    
+    # Metrics
+    external_metrics = relationship("ExternalMetric", back_populates="member", cascade="all, delete-orphan")
+
+
+class MemberWP(Base):
+    """Many-to-many relationship between academic members and WPs."""
+    __tablename__ = "member_wps"
+    
+    member_id = Column(Integer, ForeignKey("academic_members.id"), primary_key=True)
+    wp_id = Column(Integer, ForeignKey("wps.id"), primary_key=True)
 
 
 class ResearcherDetails(Base):
@@ -134,7 +158,9 @@ class ResearcherDetails(Base):
     member_id = Column(Integer, ForeignKey("academic_members.id"), nullable=False)
     
     # Identity & Metadata
-    orcid = Column(String(50), nullable=True)
+    orcid = Column(String(50), unique=True, nullable=True, index=True)
+    is_auditable = Column(Boolean, default=True)  # False if no ORCID
+    last_openalex_sync = Column(DateTime, nullable=True)
     first_name = Column(String(100), nullable=True)
     last_name = Column(String(100), nullable=True)
     name_variations = Column(Text, nullable=True)  # Pipe-separated variations
@@ -147,6 +173,8 @@ class ResearcherDetails(Base):
     # Academic Metrics
     citaciones_totales = Column(Integer, nullable=True)
     indice_h = Column(Integer, nullable=True)
+    works_count = Column(Integer, nullable=True)  # OpenAlex: Total publications
+    i10_index = Column(Integer, nullable=True)    # OpenAlex: Publications with ≥10 citations
     url_foto = Column(Text, nullable=True)
     
     member = relationship("AcademicMember", back_populates="researcher_details")
@@ -198,6 +226,51 @@ class MeetingMinute(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class ExternalMetric(Base):
+    """Raw metrics from external sources (e.g., OpenAlex, Google Scholar)."""
+    __tablename__ = "external_metrics"
+
+    id = Column(Integer, primary_key=True, index=True)
+    member_id = Column(Integer, ForeignKey("academic_members.id"), nullable=True) # Made nullable as per plan flexibility
+    publication_id = Column(Integer, ForeignKey("publicaciones.id"), nullable=True) # New field
+    
+    source = Column(String(50), nullable=False) # e.g., 'openalex', 'scholar'
+    metric_type = Column(String(50), nullable=False) # e.g., 'h_index', 'i10_index', 'citation_count'
+    value = Column(Float, nullable=False)
+    last_updated = Column(DateTime, default=datetime.utcnow) # Renamed from fetched_at
+    
+    member = relationship("AcademicMember", back_populates="external_metrics")
+    publication = relationship("Publication", backref="external_metrics") # Simple backref for now
+
+
+
+class IngestionAudit(Base):
+    """Audit log for data ingestion processes."""
+    __tablename__ = "ingestion_audit"
+
+    id = Column(Integer, primary_key=True, index=True)
+    action = Column(String(100), nullable=False) # e.g., 'sync_publications', 'update_metrics'
+    status = Column(String(50), nullable=False) # 'success', 'failed', 'partial'
+    payload_summary = Column(Text, nullable=True) # JSON summary of what was processed
+    timestamp = Column(DateTime, default=datetime.utcnow)
+
+
+class PublicationImpact(Base):
+    """Impact metrics for specific publications."""
+    __tablename__ = "publication_impact"
+
+    id = Column(Integer, primary_key=True, index=True)
+    publication_id = Column(Integer, ForeignKey("publicaciones.id"), nullable=False, unique=True)
+    
+    citation_count = Column(Integer, default=0)
+    quartile = Column(String(10), nullable=True) # Q1, Q2, etc.
+    jif = Column(Float, nullable=True) # Journal Impact Factor
+    is_international_collab = Column(Boolean, default=False)
+    
+    publication = relationship("Publication", back_populates="impact_metrics")
+
+
+
 # ===========================
 # PROJECTS & ORGANIZATION
 # ===========================
@@ -211,7 +284,8 @@ class WorkPackage(Base):
     
     # Relationships
     projects = relationship("Project", back_populates="wp")
-    members = relationship("AcademicMember", back_populates="wp")
+    members = relationship("AcademicMember", back_populates="wp") # Legacy One-to-Many
+    members_list = relationship("AcademicMember", secondary="member_wps", back_populates="wps") # New Many-to-Many
 
 
 class Project(Base):

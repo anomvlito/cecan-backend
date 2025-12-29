@@ -50,8 +50,8 @@ htmlcov/
 docs/_build/
 
 # ======================================
-# Scripts de desarrollo (no publicar)
-# ======================================
+#Scripts de desarrollo (no publicar)
+======================================
 
 # Scripts de debugging
 scripts/debug_*.py
@@ -68,6 +68,16 @@ scripts/verify_*.py
 # Scripts de comparación/revisión
 scripts/compare_*.py
 scripts/restart_*.py
+
+
+
+debug_page.png
+ingest_domain_data.py
+investigadores_cecan_ordenado.xlsx
+migrations/add_users_columns.py
+scraper_que_hacemos.py
+sync_researchers.py
+verify_excel.py
 
 # ======================================
 # Datos sensibles adicionales

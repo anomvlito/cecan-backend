@@ -171,7 +171,7 @@ backend/
 ├── database/
 │   ├── init.py           # Script de creación de tablas
 │   ├── seed.py           # Script de creación de usuario admin
-│   └── legacy_wrapper.py # Compatibilidad con grafo legacy
+│   └── session.py        # Gestión de sesiones SQLAlchemy
 ├── migrations/           # Scripts de migración de datos
 ├── services/             # Lógica de negocio (Auth, RAG, Scraper)
 ├── scripts/              # Scripts de utilidad (Verificación API)
@@ -254,7 +254,8 @@ El backend mantiene compatibilidad con datos históricos:
 - `GET /me`: Obtener perfil del usuario actual.
 
 ### 🌍 Públicos (`/api/public`)
-- `GET /researchers`: Lista de investigadores para el sitio web (datos sanitizados).
+- `GET /researchers`: Lista de investigadores para el sitio web. Incluye lista anidada de publicaciones (`publications`) con ID, título, año y URL.
+- `GET /publications`: Lista de todas las publicaciones. Incluye lista anidada de autores (`authors`) con ID, nombre y avatar.
 - `GET /graph`: Datos del grafo de red (nodos y aristas) para visualización.
 
 ### 📂 Catálogos (`/api/catalogs`)
@@ -390,7 +391,7 @@ pip install bcrypt==4.0.1
   ```
 - O usa el módulo de Python directamente:
   ```bash
-  python -m uvicorn main:app --reload
+  python3 -m uvicorn main:app --reload
   ```
 
 ---

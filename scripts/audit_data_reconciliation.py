@@ -6,12 +6,12 @@ import sys
 import os
 
 # Add project root to path
-sys.path.append(os.getcwd())
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from backend.config import DB_PATH
+    from config import DB_PATH
 except ImportError:
-    DB_PATH = "backend/cecan.db"
+    DB_PATH = "cecan.db"
 
 RAW_DATA = """c|TITULO|Investigador responsable|Principales (8)|Otros investigadores|otros WP involucrados|COLORECTAL|MAMA|EXPERIENCIA|CUELLO UTERINO|GASTRICO|VESICULA|PULMON|EPA|BIOMARCADORES|SOCIEDAD CIVIL
 1|Modelamiento carga evitable|Paula Margozzini|Paula Margozzini|Pedro Zitko|2,4,5|X|X||X|X|X|X||||
@@ -41,7 +41,7 @@ RAW_DATA = """c|TITULO|Investigador responsable|Principales (8)|Otros investigad
 3|Microbiota|Erick Riquelme|Enrique Castellon|Arnoldo Riquelme|2|x||||||x|x|||x|
 3|DPYD y toxicidad por FU|Olga Barajas|Enrique Castellon|Luis Quiñones, Leslie Cerpa, Claudio Alarcón|2||||||||||x|
 3|Biomarcadores e inflamacion|Carolina Ibañez|Enrique Castellon|Mauricio Cuello|2||||||||||x|
-3|Sociedad civil y PNC|Báltica Cabieses|Manuel Espinoza|Alexandra Obach, Antonia Roberts, Francisca Vezzani, Carla Campaña|||||||x||||X
+4|Sociedad civil y PNC|Báltica Cabieses|Manuel Espinoza|Alexandra Obach, Antonia Roberts, Francisca Vezzani, Carla Campaña|||||||x||||X
 4|Empoderammiento sociedad civil|Báltica Cabieses|Manuel Espinoza|Alexandra Obach, Antonia Roberts, Francisca Vezzani, Carla Campaña|1,2||||||||||X
 4|Uso canastas GES|Paula Bedregal|Oscar Arteaga|Carolina de la Fuente, Paula Zamorano|2||||X||||||
 4|Sistema de salud ante el cancer|Paula Bedregal|Oscar Arteaga|Pedro Zitko|1||||X||||||
@@ -63,169 +63,93 @@ def normalize_name(name):
         return None
     return name.strip().replace('  ', ' ')
 
-def create_schema(cursor):
-    # DO NOT DROP Investigadores
-    cursor.executescript("""
-        DROP TABLE IF EXISTS Proyecto_Investigador;
-        DROP TABLE IF EXISTS Proyecto_Nodo;
-        DROP TABLE IF EXISTS Proyecto_OtroWP;
-        DROP TABLE IF EXISTS Proyectos;
-        DROP TABLE IF EXISTS Nodos;
-        DROP TABLE IF EXISTS WPs;
-
-        CREATE TABLE WPs (
-            id INTEGER PRIMARY KEY,
-            nombre TEXT
-        );
-
-        CREATE TABLE Nodos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nombre TEXT UNIQUE
-        );
-
-        -- Investigadores table is assumed to exist
-
-        CREATE TABLE Proyectos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            titulo TEXT,
-            wp_id INTEGER,
-            FOREIGN KEY(wp_id) REFERENCES WPs(id)
-        );
-
-        CREATE TABLE Proyecto_Investigador (
-            proyecto_id INTEGER,
-            investigador_id INTEGER,
-            rol TEXT,
-            FOREIGN KEY(proyecto_id) REFERENCES Proyectos(id),
-            FOREIGN KEY(investigador_id) REFERENCES Investigadores(id)
-        );
-
-        CREATE TABLE Proyecto_Nodo (
-            proyecto_id INTEGER,
-            nodo_id INTEGER,
-            FOREIGN KEY(proyecto_id) REFERENCES Proyectos(id),
-            FOREIGN KEY(nodo_id) REFERENCES Nodos(id)
-        );
-        
-        CREATE TABLE Proyecto_OtroWP (
-            proyecto_id INTEGER,
-            wp_id INTEGER,
-            FOREIGN KEY(proyecto_id) REFERENCES Proyectos(id),
-            FOREIGN KEY(wp_id) REFERENCES WPs(id)
-        );
-    """)
-
-    wps = [
-        (1, 'Prevención'),
-        (2, 'Optimización de trayectoria'),
-        (3, 'Innovación y medicina personalizada'),
-        (4, 'Investigación en políticas públicas'),
-        (5, 'Data para la acción')
-    ]
-    cursor.executemany("INSERT INTO WPs (id, nombre) VALUES (?, ?)", wps)
-
-def get_or_create_investigator(cursor, name):
-    name = normalize_name(name)
-    if not name:
-        return None
-    
-    cursor.execute("SELECT id FROM Investigadores WHERE nombre = ?", (name,))
-    row = cursor.fetchone()
-    if row:
-        return row[0]
-    
-    # If not exists, insert it (should not happen if DB was consistent, but good to have)
-    print(f"Warning: Investigator {name} not found, creating...")
-    cursor.execute("INSERT INTO Investigadores (nombre) VALUES (?)", (name,))
-    return cursor.lastrowid
-
-def get_or_create_nodo(cursor, name):
-    name = normalize_name(name)
-    cursor.execute("SELECT id FROM Nodos WHERE nombre = ?", (name,))
-    row = cursor.fetchone()
-    if row:
-        return row[0]
-    cursor.execute("INSERT INTO Nodos (nombre) VALUES (?)", (name,))
-    return cursor.lastrowid
-
-def process_data():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    print("Restoring schema (excluding Investigadores)...")
-    create_schema(cursor)
-    
+def extract_researchers_from_raw():
+    researchers = set()
     reader = csv.DictReader(io.StringIO(RAW_DATA), delimiter='|')
     
-    node_headers = ['COLORECTAL', 'MAMA', 'EXPERIENCIA', 'CUELLO UTERINO', 'GASTRICO', 'VESICULA', 'PULMON', 'EPA', 'BIOMARCADORES', 'SOCIEDAD CIVIL']
-
-    print("Populating Proyectos and relations...")
     for row in reader:
-        try:
-            wp_val = row['c'].strip()
-            if not wp_val: continue 
-            wp_id = int(wp_val)
-        except (ValueError, KeyError) as e:
-            print(f"Error skipping row: {e} in row: {row}")
-            continue 
-            
-        titulo = row['TITULO'].strip()
+        # Responsable
+        resp = normalize_name(row.get('Investigador responsable'))
+        if resp: researchers.add(resp)
         
-        cursor.execute("INSERT INTO Proyectos (titulo, wp_id) VALUES (?, ?)", (titulo, wp_id))
-        project_id = cursor.lastrowid
-        
-        # Procesar Investigadores
-        resp_name = row.get('Investigador responsable')
-        if resp_name:
-            inv_id = get_or_create_investigator(cursor, resp_name)
-            if inv_id:
-                cursor.execute("INSERT INTO Proyecto_Investigador (proyecto_id, investigador_id, rol) VALUES (?, ?, ?)", 
-                           (project_id, inv_id, 'Responsable'))
-            
         # Principales
         principales = row.get('Principales (8)')
         if principales:
             names = re.split(r',| y ', principales)
-            for name in names:
-                inv_id = get_or_create_investigator(cursor, name)
-                if inv_id:
-                    cursor.execute("INSERT INTO Proyecto_Investigador (proyecto_id, investigador_id, rol) VALUES (?, ?, ?)", 
-                                (project_id, inv_id, 'Principal'))
-
+            for n in names:
+                clean = normalize_name(n)
+                if clean: researchers.add(clean)
+                
         # Otros
         otros = row.get('Otros investigadores')
         if otros:
             names = re.split(r',| y ', otros)
-            for name in names:
-                inv_id = get_or_create_investigator(cursor, name)
-                if inv_id:
-                    cursor.execute("INSERT INTO Proyecto_Investigador (proyecto_id, investigador_id, rol) VALUES (?, ?, ?)", 
-                                (project_id, inv_id, 'Colaborador'))
-                                
-        # Nodos
-        for header in node_headers:
-            val = row.get(header)
-            if val and val.strip().lower() == 'x':
-                nodo_id = get_or_create_nodo(cursor, header)
-                cursor.execute("INSERT INTO Proyecto_Nodo (proyecto_id, nodo_id) VALUES (?, ?)", (project_id, nodo_id))
+            for n in names:
+                clean = normalize_name(n)
+                if clean: researchers.add(clean)
                 
-        # Otros WPs
-        otros_wps = row.get('otros WP involucrados')
-        if otros_wps:
-            ids = otros_wps.replace(' ', '').split(',')
-            for wp_id_str in ids:
-                if wp_id_str.isdigit():
-                    cursor.execute("INSERT INTO Proyecto_OtroWP (proyecto_id, wp_id) VALUES (?, ?)", (project_id, int(wp_id_str)))
+    return sorted(list(researchers))
 
-    conn.commit()
+def audit_database():
+    print(f"--- Data Reconciliation Audit ---")
+    print(f"Database: {DB_PATH}")
     
-    print("Database restored successfully.")
-    cursor.execute("SELECT COUNT(*) FROM Proyectos")
-    print(f"Proyectos: {cursor.fetchone()[0]}")
-    cursor.execute("SELECT COUNT(*) FROM Investigadores")
-    print(f"Investigadores: {cursor.fetchone()[0]}")
+    if not os.path.exists(DB_PATH):
+        print("ERROR: Database not found.")
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
     
+    # 1. Check Tables
+    print("\n[1] Checking Tables...")
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    tables = [t[0] for t in cursor.fetchall()]
+    print(f"Existing tables: {tables}")
+    
+    has_proyectos = 'proyectos' in tables or 'Proyectos' in tables
+    has_investigadores = 'Investigadores' in tables or 'investigadores' in tables
+    has_academic_members = 'academic_members' in tables
+    
+    print(f" - Table 'proyectos': {'YES' if has_proyectos else 'NO'}")
+    print(f" - Table 'Investigadores' (Legacy): {'YES' if has_investigadores else 'NO'}")
+    print(f" - Table 'academic_members' (New): {'YES' if has_academic_members else 'NO'}")
+    
+    # 2. Reconcile Researchers
+    print("\n[2] Reconciling Researchers...")
+    raw_researchers = extract_researchers_from_raw()
+    print(f"Total unique researchers in RAW_DATA: {len(raw_researchers)}")
+    
+    db_researchers = set()
+    if has_academic_members:
+        cursor.execute("SELECT full_name FROM academic_members")
+        db_researchers = {row[0] for row in cursor.fetchall() if row[0]}
+    elif has_investigadores:
+        cursor.execute("SELECT nombre FROM Investigadores")
+        db_researchers = {row[0] for row in cursor.fetchall() if row[0]}
+        
+    print(f"Total researchers in DB: {len(db_researchers)}")
+    
+    matches = []
+    gaps = []
+    
+    for name in raw_researchers:
+        if name in db_researchers:
+            matches.append(name)
+        else:
+            gaps.append(name)
+            
+    print(f" - Matches (Found in DB): {len(matches)}")
+    print(f" - Gaps (Missing in DB): {len(gaps)}")
+    
+    if gaps:
+        print("\n[!] Missing Researchers (First 10):")
+        for g in gaps[:10]:
+            print(f"   - {g}")
+        if len(gaps) > 10:
+            print(f"   ... and {len(gaps)-10} more.")
+            
     conn.close()
 
 if __name__ == "__main__":
-    process_data()
+    audit_database()

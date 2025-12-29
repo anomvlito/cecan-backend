@@ -24,11 +24,11 @@ async def rag_query(
     Perform semantic search on publication knowledge base.
     Returns relevant chunks and AI-generated synthesis.
     """
-    from services.rag_service import SemanticSearchEngine
+    from services.rag_service import get_semantic_engine
     import sqlite3
     from config import DB_PATH
     
-    engine = SemanticSearchEngine()
+    engine = get_semantic_engine()
     chunks = engine.search_knowledge(request.query, top_k=5)
     
     if not chunks:

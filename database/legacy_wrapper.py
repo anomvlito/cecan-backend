@@ -57,20 +57,64 @@ class CecanDB:
         edges = []
         node_degrees = {}
 
-        # 1. Investigadores (usar tabla legacy que tiene datos)
-        cursor.execute("SELECT id, nombre FROM Investigadores")
-        for row in cursor.fetchall():
+        # 1. Investigadores (Migrated to academic_members)
+        # Join with researcher_details to get more info
+        cursor.execute("""
+            SELECT 
+                am.id, am.full_name, am.email, am.institution, am.wp_id,
+                rd.category, rd.citaciones_totales, rd.indice_h, rd.url_foto, rd.orcid
+            FROM academic_members am
+            LEFT JOIN researcher_details rd ON am.id = rd.member_id
+            WHERE am.member_type='researcher'
+        """)
+        
+        researchers = cursor.fetchall()
+        
+        # Helper to get WPs for a member
+        def get_member_wps(member_id):
+            # Fetch from member_wps table
+            cursor.execute("""
+                SELECT w.id, w.nombre 
+                FROM member_wps mw
+                JOIN wps w ON mw.wp_id = w.id
+                WHERE mw.member_id = ?
+            """, (member_id,))
+            return [{"id": row['id'], "nombre": row['nombre']} for row in cursor.fetchall()]
+
+        for row in researchers:
             node_id = f"inv_{row['id']}"
+            
+            # Get WPs list
+            wps_list = get_member_wps(row['id'])
+            
+            # Build rich metadata
+            metadata = {
+                "type": "Investigador",
+                "nombre": row['full_name'],
+                "email": row['email'],
+                "institution": row['institution'],
+                "wp": row['wp_id'], # Primary WP (legacy)
+                "wps": wps_list,    # List of all WPs
+                "category": row['category'],
+                "citations": row['citaciones_totales'],
+                "h_index": row['indice_h'],
+                "orcid": row['orcid'],
+                "photo": row['url_foto']
+            }
+            
             nodes.append({
                 "id": node_id,
-                "label": row['nombre'],
+                "label": row['full_name'],
                 "group": "investigator",
-                "data": {"type": "Investigador", "nombre": row['nombre']},
-                "color": "#e2e8f0"
+                "data": metadata,
+                "color": "#e2e8f0",
+                # Add image if available (Vis.js supports 'image' shape)
+                # "shape": "circularImage" if row['url_foto'] else "dot",
+                # "image": row['url_foto'] if row['url_foto'] else None
             })
             node_degrees[node_id] = 0
 
-        # 2. WPs (minúsculas)
+        # 2. WPs (lowercase)
         cursor.execute("SELECT id, nombre FROM wps")
         for row in cursor.fetchall():
             node_id = f"wp_{row['id']}"
@@ -87,7 +131,7 @@ class CecanDB:
             })
             node_degrees[node_id] = 0
 
-        # 3. Nodos temáticos (minúsculas)
+        # 3. Nodos temáticos (lowercase)
         cursor.execute("SELECT id, nombre FROM nodos")
         for row in cursor.fetchall():
             node_id = f"nodo_{row['id']}"
@@ -101,7 +145,7 @@ class CecanDB:
             })
             node_degrees[node_id] = 0
 
-        # 4. Proyectos (minúsculas)
+        # 4. Proyectos (lowercase)
         cursor.execute("SELECT id, titulo, wp_id FROM proyectos")
         for row in cursor.fetchall():
             node_id = f"proj_{row['id']}"
@@ -127,8 +171,9 @@ class CecanDB:
                 node_degrees[node_id] += 1
                 node_degrees[target_id] += 1
 
-        # 5. Edges: Proyecto - Investigador (minúsculas)
-        cursor.execute("SELECT proyecto_id, member_id as investigador_id, rol FROM proyecto_investigador")
+        # 5. Edges: Proyecto - Investigador (lowercase)
+        # Note: investigador_id column refers to academic_members.id now
+        cursor.execute("SELECT proyecto_id, investigador_id, rol FROM proyecto_investigador")
         for row in cursor.fetchall():
             source_id = f"proj_{row['proyecto_id']}"
             target_id = f"inv_{row['investigador_id']}"
@@ -139,13 +184,13 @@ class CecanDB:
                 "to": target_id,
                 "color": {"color": "#fca5a5" if is_responsable else "#e2e8f0", "opacity": 0.8 if is_responsable else 0.3},
                 "width": 2 if is_responsable else 1,
-                "hidden": True
+                # "hidden": True  <-- REMOVED TO FIX ORPHAN NODES
             })
 
             if source_id in node_degrees: node_degrees[source_id] += 1
             if target_id in node_degrees: node_degrees[target_id] += 1
 
-        # 6. Edges: Proyecto - Nodo (minúsculas)
+        # 6. Edges: Proyecto - Nodo (lowercase)
         cursor.execute("SELECT proyecto_id, nodo_id FROM proyecto_nodo")
         for row in cursor.fetchall():
             source_id = f"proj_{row['proyecto_id']}"
