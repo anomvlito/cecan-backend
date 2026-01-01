@@ -54,22 +54,22 @@ class ComplianceStatus(str, enum.Enum):
 
 class Publication(Base):
     """Scientific publications with compliance audit fields."""
-    __tablename__ = "publicaciones"
+    __tablename__ = "publications"
     
     # Basic information
     id = Column(Integer, primary_key=True, index=True)
-    titulo = Column(Text, nullable=False)
-    fecha = Column(String(50), nullable=True)
-    autores = Column(Text, nullable=True)
-    categoria = Column(String(100), nullable=True)
-    url_origen = Column(Text, nullable=True)
+    title = Column(Text, nullable=False) # Renamed from titulo
+    year = Column(String(50), nullable=True) # Renamed from fecha
+    authors = Column(Text, nullable=True) # Renamed from autores
+    category = Column(String(100), nullable=True) # Renamed from categoria
+    url = Column(Text, nullable=True) # Renamed from url_origen
     canonical_doi = Column(String(100), unique=True, nullable=True, index=True)  # Normalized DOI
-    path_pdf_local = Column(Text, nullable=True)
-    contenido_texto = Column(Text, nullable=True)
+    local_path = Column(Text, nullable=True) # Renamed from path_pdf_local
+    content = Column(Text, nullable=True) # Renamed from contenido_texto
     
     # AI-generated summaries
-    resumen_es = Column(Text, nullable=True)
-    resumen_en = Column(Text, nullable=True)
+    summary_es = Column(Text, nullable=True) # Renamed from resumen_es
+    summary_en = Column(Text, nullable=True) # Renamed from resumen_en
     
     # Metadata Enrichment
     extracted_orcids = Column(Text, nullable=True)  # Comma-separated list of ORCIDs found in PDF
@@ -232,7 +232,7 @@ class ExternalMetric(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     member_id = Column(Integer, ForeignKey("academic_members.id"), nullable=True) # Made nullable as per plan flexibility
-    publication_id = Column(Integer, ForeignKey("publicaciones.id"), nullable=True) # New field
+    publication_id = Column(Integer, ForeignKey("publications.id"), nullable=True) # New field
     
     source = Column(String(50), nullable=False) # e.g., 'openalex', 'scholar'
     metric_type = Column(String(50), nullable=False) # e.g., 'h_index', 'i10_index', 'citation_count'
@@ -260,7 +260,7 @@ class PublicationImpact(Base):
     __tablename__ = "publication_impact"
 
     id = Column(Integer, primary_key=True, index=True)
-    publication_id = Column(Integer, ForeignKey("publicaciones.id"), nullable=False, unique=True)
+    publication_id = Column(Integer, ForeignKey("publications.id"), nullable=False, unique=True)
     
     citation_count = Column(Integer, default=0)
     quartile = Column(String(10), nullable=True) # Q1, Q2, etc.
@@ -323,7 +323,7 @@ class ResearcherPublication(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     member_id = Column(Integer, ForeignKey("academic_members.id"), nullable=False)
-    publicacion_id = Column(Integer, ForeignKey("publicaciones.id"), nullable=False)
+    publicacion_id = Column(Integer, ForeignKey("publications.id"), nullable=False)
     match_score = Column(Integer, nullable=True)  # 0-100 confidence score
     match_method = Column(String(50), nullable=True)  # e.g., "exact_name", "fuzzy_match"
     
@@ -377,7 +377,7 @@ class PublicationChunk(Base):
     __tablename__ = "publication_chunks"
     
     id = Column(Integer, primary_key=True, index=True)
-    publicacion_id = Column(Integer, ForeignKey("publicaciones.id"), nullable=False)
+    publicacion_id = Column(Integer, ForeignKey("publications.id"), nullable=False)
     chunk_index = Column(Integer, nullable=False)  # Sequential index within document
     content = Column(Text, nullable=False)
     embedding = Column(Text, nullable=True)  # Serialized vector (BLOB in SQLite, or JSON)

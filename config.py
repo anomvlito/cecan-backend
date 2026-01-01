@@ -12,6 +12,12 @@ load_dotenv(dotenv_path=BASE_DIR / ".env")
 
 # Database
 DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "cecan.db"))
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if DATABASE_URL:
+    SQLALCHEMY_DATABASE_URL = DATABASE_URL
+else:
+    SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_PATH}"
 
 # Security
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "CHANGE_THIS_SECRET_KEY_IN_PRODUCTION_USE_ENV")
