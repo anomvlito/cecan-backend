@@ -5,10 +5,15 @@ Provides database connection and session handling
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
-from config import DB_PATH
+from config import SQLALCHEMY_DATABASE_URL
+
+# Configure connection args
+connect_args = {}
+if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
+    connect_args = {"check_same_thread": False}
 
 # Create engine
-engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
+engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args=connect_args)
 
 # Create session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

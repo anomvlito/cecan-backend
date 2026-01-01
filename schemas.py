@@ -144,12 +144,15 @@ class ResearchOpportunityOut(BaseModel):
 
 class PublicationOut(BaseModel):
     id: int
-    title: str = Field(..., alias="titulo")
-    year: Optional[str] = Field(None, alias="fecha")
-    url: Optional[str] = Field(None, alias="url_origen")
-    doi: Optional[str] = Field(None, alias="canonical_doi")
+    title: str = Field(..., serialization_alias="titulo")
+    year: Optional[str] = Field(None, serialization_alias="fecha")
+    url: Optional[str] = Field(None, serialization_alias="url_origen")
+    doi: Optional[str] = Field(None, serialization_alias="canonical_doi")
     
     # New Fields
+    summary_es: Optional[str] = Field(None, serialization_alias="resumen_es")
+    summary_en: Optional[str] = Field(None, serialization_alias="resumen_en")
+    
     metrics_data: Optional[Dict[str, Any]] = None
     
     class Config:
@@ -157,16 +160,19 @@ class PublicationOut(BaseModel):
         populate_by_name = True
 
 class PublicationUpdate(BaseModel):
-    title: Optional[str] = None
-    year: Optional[str] = None
-    url: Optional[str] = None
-    url_origen: Optional[str] = None
-    doi: Optional[str] = None
-    canonical_doi: Optional[str] = None
-    resumen_es: Optional[str] = None
-    resumen_en: Optional[str] = None
+    title: Optional[str] = Field(None, alias="titulo")
+    year: Optional[str] = Field(None, alias="fecha")
+    url: Optional[str] = Field(None, alias="url_origen")
+    doi: Optional[str] = Field(None, alias="canonical_doi")
+    
+    # English fields direct access (optional, but good for internal use)
+    # Pydantic allows both by default if populate_by_name=True is set
+    
+    summary_es: Optional[str] = Field(None, alias="resumen_es")
+    summary_en: Optional[str] = Field(None, alias="resumen_en")
     author_ids: Optional[List[int]] = None
     
     class Config:
         from_attributes = True
+        populate_by_name = True
 
