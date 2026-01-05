@@ -6,7 +6,8 @@ API endpoints for semantic search and knowledge exploration
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from api.routes.auth import get_current_user, User
+from core.security import get_current_user
+from core.models import User
 
 router = APIRouter(prefix="/rag", tags=["RAG & Knowledge"])
 

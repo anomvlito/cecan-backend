@@ -6,7 +6,8 @@ API endpoints for metrics, graph data, and dashboard statistics
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 
-from api.routes.auth import get_current_user, User
+from core.security import get_current_user
+from core.models import User
 from database.session import get_db
 from services.analytics_service import analytics_service
 from services.graph_service import build_graph_data

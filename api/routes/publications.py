@@ -3,52 +3,40 @@ Publication Routes for CECAN Platform
 API endpoints for publications and data management
 """
 
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
-from sqlalchemy.orm import Session
-import sqlite3
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Form, Body
+from sqlalchemy.orm import Session, joinedload
 import threading
+import os
 from datetime import datetime
+import json
 
 from database.session import get_db
-from api.routes.auth import require_editor, get_current_user, User
-from config import DB_PATH
+from core.security import require_editor, get_current_user
+from core.models import User
 from services import scraper_service, compliance_service, publication_service
-from core.models import Publication, ResearcherPublication, AcademicMember
-from schemas import PublicationUpdate
+from core.models import Publication, ResearcherPublication, AcademicMember, PublicationImpact
+from schemas import PublicationUpdate, PublicationOut
 
 router = APIRouter(prefix="/publications", tags=["Publications"])
 
 
-@router.get("")
-async def get_publications(current_user: User = Depends(get_current_user)):
-    """Get all publications with researcher matches"""
-    import json
+@router.get("", response_model=list[PublicationOut])
+async def get_publications(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get all publications with researcher matches
+    """
+    # Use SQLAlchemy to fetch publications with relationships if needed
+    # For now, fetching basic data. 
+    # Note: PublicationOut schema handles deserialization if configured correctly, 
+    # but let's manualy check the metrics_data usage if it's stored as JSON-in-string or native JSON type in Postgres.
+    # In Postgres `JSON` type comes out as dict, so no need for manual deserialization unless it was stored as string.
     
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT * FROM Publicaciones ORDER BY id DESC")
-    pubs = [dict(row) for row in cursor.fetchall()]
-    
-    for pub in pubs:
-        # Deserialize JSON fields
-        if pub.get('metrics_data') and isinstance(pub['metrics_data'], str):
-            try:
-                pub['metrics_data'] = json.loads(pub['metrics_data'])
-            except (json.JSONDecodeError, TypeError):
-                pub['metrics_data'] = None
-        
-        cursor.execute("""
-            SELECT i.nombre, ip.match_score, ip.match_method
-            FROM Investigador_Publicacion ip
-            JOIN Investigadores i ON ip.investigador_id = i.id
-            WHERE ip.publicacion_id = ?
-        """, (pub['id'],))
-        matches = [dict(row) for row in cursor.fetchall()]
-        pub['investigadores_relacionados'] = matches
-        
-    conn.close()
+    pubs = db.query(Publication).order_by(Publication.id.desc()).all()
+    # The Pydantic model `PublicationOut` should automatically handle the conversion 
+    # from the ORM model to the JSON response.
     return pubs
 
 
@@ -78,7 +66,6 @@ async def run_audit(
 ):
     """
     Trigger full compliance audit.
-    Requires Editor role.
     """
     try:
         compliance_service.run_full_audit(db)
@@ -94,7 +81,6 @@ async def reset_audit(
 ):
     """
     Reset compliance audit status for all publications.
-    Requires Editor role.
     """
     try:
         compliance_service.reset_audit_status(db)
@@ -113,12 +99,9 @@ async def extract_missing_dois(
 ):
     """
     Extract DOIs from publications.
-    Args:
-        dry_run: If True, don't save changes
-        force_recheck: If True, scan ALL publications even if they have URL
-        limit: Max publications to scan
     """
     from services.publication_service import extract_doi
+    from services.openalex_service import extract_doi_from_url
     
     try:
         query = db.query(Publication)
@@ -138,94 +121,51 @@ async def extract_missing_dois(
         
         print(f"[Extract DOIs] Processing {total_scanned} publications (dry_run={dry_run})")
         
-        # Pre-load existing DOIs to check for duplicates and avoid IntegrityError
-        # (This avoids crashing the batch if duplicates are found)
+        # Pre-load existing DOIs
         existing_dois_rows = db.query(Publication.canonical_doi).filter(Publication.canonical_doi.isnot(None)).all()
         existing_dois = {row[0] for row in existing_dois_rows if row[0]}
         
         for pub in publications:
             try:
-                # Debug: Check what we have
-                has_text = bool(pub.contenido_texto and len(pub.contenido_texto) > 50)
-                print(f"  [Pub {pub.id}] Title: {pub.titulo[:50]}... | Has text: {has_text} | Text length: {len(pub.contenido_texto) if pub.contenido_texto else 0}")
+                # Use 'content' field instead of 'contenido_texto'
+                has_text = bool(pub.content and len(pub.content) > 50)
                 
                 # Skip if no text content
-                if not pub.contenido_texto or len(pub.contenido_texto) < 50:
+                if not pub.content or len(pub.content) < 50:
                     skipped += 1
-                    details.append({
-                        "pub_id": pub.id,
-                        "title": pub.titulo[:50] if pub.titulo else "Sin título",
-                        "status": "skipped",
-                        "reason": "No text content"
-                    })
                     continue
                 
                 # Try to extract DOI from text
-                doi_url = extract_doi(pub.contenido_texto)
+                doi_url = extract_doi(pub.content)
                 
                 if doi_url:
                     dois_found += 1
-                    
-                    # Extract clean DOI
-                    from services.openalex_service import extract_doi_from_url
                     clean_doi = extract_doi_from_url(doi_url)
                     
-                    # Check for duplicates (unless it's the same publication being re-scanned)
                     if clean_doi in existing_dois and pub.canonical_doi != clean_doi:
-                        print(f"  ⚠️ Duplicate DOI found (ignoring update): {clean_doi}")
                         skipped += 1
-                        details.append({
-                            "pub_id": pub.id,
-                            "title": pub.titulo[:50] if pub.titulo else "Sin título",
-                            "status": "skipped_duplicate",
-                            "doi": clean_doi,
-                            "reason": "DOI already exists in another publication"
-                        })
                         continue
                     
-                    print(f"  ✓ Found DOI: {clean_doi}")
-                    
                     if not dry_run:
-                        # Update publication
-                        pub.url_origen = doi_url
+                        pub.url = doi_url # Renamed from url_origen
                         pub.canonical_doi = clean_doi
                         dois_updated += 1
                         existing_dois.add(clean_doi)
                     
                     details.append({
                         "pub_id": pub.id,
-                        "title": pub.titulo[:50] if pub.titulo else "Sin título",
+                        "title": pub.title[:50] if pub.title else "Untitled",
                         "status": "found" if dry_run else "updated",
                         "doi": clean_doi
-                    })
-                else:
-                    # Show first 200 chars of text for debugging
-                    text_preview = pub.contenido_texto[:200] if pub.contenido_texto else ""
-                    print(f"  ✗ No DOI found. Text preview: {text_preview}...")
-                    
-                    details.append({
-                        "pub_id": pub.id,
-                        "title": pub.titulo[:50] if pub.titulo else "Sin título",
-                        "status": "not_found",
-                        "reason": "No DOI pattern detected"
                     })
             
             except Exception as e:
                 failed += 1
-                details.append({
-                    "pub_id": pub.id,
-                    "title": pub.titulo[:50] if pub.titulo else "Sin título",
-                    "status": "error",
-                    "error": str(e)
-                })
                 print(f"  ✗ Error processing {pub.id}: {str(e)}")
         
         # Commit changes if not dry run
         if not dry_run and dois_updated > 0:
             db.commit()
-            print(f"[Extract DOIs] ✅ Updated {dois_updated} publications")
-        
-        print(f"[Extract DOIs] Summary: Scanned={total_scanned}, Found={dois_found}, Updated={dois_updated}, Skipped={skipped}, Failed={failed}")
         
         return {
             "status": "completed",
@@ -233,34 +173,28 @@ async def extract_missing_dois(
             "scanned": total_scanned,
             "dois_found": dois_found,
             "dois_updated": dois_updated if not dry_run else 0,
-            "skipped": skipped,
-            "failed": failed,
-            "details": details,
-            "message": f"{'[DRY RUN] ' if dry_run else ''}Escaneadas {total_scanned} publicaciones, {dois_found} DOIs encontrados{', ' + str(dois_updated) + ' actualizados' if not dry_run else ''}"
+            "details": details
         }
     
     except Exception as e:
         db.rollback()
-        print(f"[Extract DOIs] ❌ Error: {str(e)}")
         return {
             "status": "error",
-            "message": f"Error extrayendo DOIs: {str(e)}"
+            "message": f"Error extracting DOIs: {str(e)}"
         }
 
 
 @router.post("/upload")
 async def upload_pdf(
     file: UploadFile = File(...),
+    skip_ai: bool = Form(False),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_editor)
 ):
     """
-    Upload a PDF publication with intelligent data enrichment.
-    Automatically detects DOI, matches authors, and generates summaries.
-    Requires Editor role.
+    Upload a PDF publication with data enrichment.
     """
     try:
-        # Read file content
         content = await file.read()
         
         # Validate PDF
@@ -268,80 +202,106 @@ async def upload_pdf(
         if not is_valid:
             raise HTTPException(status_code=400, detail=error_msg)
         
-        # ✅ Check for duplicates (Idempotency)
-        # Use filename as a simple proxy for duplicate detection
         clean_title = file.filename.replace('.pdf', '').replace('_', ' ')
         
+        # Check duplicate by title
         existing_pub = db.query(Publication).filter(
-            Publication.titulo == clean_title
+            Publication.title == clean_title # Renamed from titulo
         ).first()
         
         if existing_pub:
-            # Publication already exists - return existing record instead of reprocessing
-            print(f"   [Upload] Duplicate detected: '{clean_title}' already exists (ID: {existing_pub.id})")
-            
-            # Get existing authors
-            from core.models import ResearcherPublication, AcademicMember
-            existing_authors = db.query(AcademicMember).join(ResearcherPublication).filter(
-                ResearcherPublication.publicacion_id == existing_pub.id
-            ).all()
-            author_names = [a.full_name for a in existing_authors]
-            
-            # Check if already indexed in RAG
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM publication_chunks WHERE publicacion_id = ?", (existing_pub.id,))
-            existing_chunks = cursor.fetchone()[0]
-            conn.close()
-            
             return {
                 "id": existing_pub.id,
                 "status": "duplicate",
-                "filename": file.filename,
-                "text_extracted": bool(existing_pub.contenido_texto),
-                "doi_detected": bool(existing_pub.url_origen),
-                "doi_url": existing_pub.url_origen,
-                "authors_matched": len(existing_authors),
-                "author_names": author_names,
-                "summaries_generated": bool(existing_pub.resumen_es),
-                "processing_notes": [
-                    "⚠️ Publicación duplicada detectada",
-                    f"Ya existe con ID {existing_pub.id}",
-                    "No se procesó nuevamente para ahorrar cuota de API"
-                ],
-                "rag_indexed": existing_chunks > 0,
-                "rag_chunks": existing_chunks,
-                "rag_searchable": existing_chunks > 0,
-                "rag_already_indexed": True,
-                "message": f"Publicación duplicada: ya existe como ID {existing_pub.id}"
+                "message": f"Publication duplicate: ID {existing_pub.id}"
             }
         
-        # Enrich publication data (DOI, authors, summaries)
-        enriched_data = publication_service.enrich_publication_data(content, file.filename, db)
+        # Enrich data
+        enriched_data = publication_service.enrich_publication_data(content, file.filename, db, skip_ai=skip_ai)
         
-        # Prepare author names string
+        # Save PDF file to disk
+        pdf_directory = "data/publications"
+        os.makedirs(pdf_directory, exist_ok=True)
+        safe_filename = file.filename.replace(' ', '_').replace('/', '_')
+        file_path = os.path.join(pdf_directory, safe_filename)
+        
+        with open(file_path, 'wb') as f:
+            f.write(content)
+        
+        print(f"   [System] Saved PDF to: {file_path}")
+        
+        # Determine authors string
         author_names = []
         if enriched_data["matched_author_ids"]:
-            from core.models import AcademicMember
             authors = db.query(AcademicMember).filter(
                 AcademicMember.id.in_(enriched_data["matched_author_ids"])
             ).all()
             author_names = [a.full_name for a in authors]
         
-        autores_str = ", ".join(author_names) if author_names else "Autores no identificados"
+        autores_str = ", ".join(author_names) if author_names else "Unknown Authors"
         
-        # Extract clean title from filename
-        clean_title = file.filename.replace('.pdf', '').replace('_', ' ')
+        # Smart Year Detection + Metrics from OpenAlex (graceful degradation)
+        publication_year = str(datetime.now().year)  # Fallback
+        openalex_metrics = None
+        canonical_doi_value = enriched_data.get("doi")
+        doi_status = "pending"
         
-        # Create new publication with enriched data
+        if canonical_doi_value:
+            try:
+                from services.openalex_service import get_publication_by_doi, extract_publication_metadata
+                print(f"   [OpenAlex] Fetching metadata for DOI: {canonical_doi_value}")
+                openalex_data = get_publication_by_doi(canonical_doi_value)
+                openalex_metrics = extract_publication_metadata(openalex_data)
+                doi_status = "valid_openalex"
+                
+                # Extract year and title from OpenAlex
+                if openalex_metrics:
+                    if openalex_metrics.get("publication_year"):
+                        publication_year = str(openalex_metrics["publication_year"])
+                        print(f"   [OpenAlex] ✅ Year detected: {publication_year}")
+                    
+                    if openalex_metrics.get("title"):
+                        clean_title = openalex_metrics["title"]
+                        print(f"   [OpenAlex] ✅ Title detected: {clean_title}")
+
+            except Exception as e:
+                print(f"   [OpenAlex] ⚠️  Could not fetch metadata: {e}")
+                # Continue with defaults - don't crash upload
+        
+        # Extract ORCIDs from PDF hyperlinks
+        orcids_list = []
+        author_metadata = None
+        try:
+            from services.orcid_metadata_service import (
+                extract_orcids_from_pdf_hyperlinks,
+                enrich_orcids_with_metadata
+            )
+            
+            orcids_list = extract_orcids_from_pdf_hyperlinks(content)
+            if orcids_list:
+                print(f"   [ORCID] Found {len(orcids_list)} ORCIDs in PDF hyperlinks")
+                author_metadata = enrich_orcids_with_metadata(orcids_list)
+        except Exception as orcid_error:
+            print(f"   [ORCID] Warning: Could not extract ORCID metadata: {orcid_error}")
+        
+        # Create Publication
         new_pub = Publication(
-            titulo=clean_title,
-            autores=autores_str,
-            fecha=str(datetime.now().year),
-            url_origen=enriched_data["doi_url"],  # DOI URL if found
-            contenido_texto=enriched_data["text"] if enriched_data["text"] else "(Sin texto extraíble)",
-            resumen_es=enriched_data["resumen_es"],
-            resumen_en=enriched_data["resumen_en"],
+            title=clean_title,
+            authors=autores_str,
+            year=publication_year,
+            url=enriched_data.get("doi_url"),
+            local_path=file_path,  # Add saved file path
+            content=enriched_data.get("text", ""),
+            summary_es=enriched_data.get("resumen_es"),
+            summary_en=enriched_data.get("resumen_en"),
+            canonical_doi=canonical_doi_value,
+            doi_verification_status=doi_status,
+            extracted_orcids=",".join(orcids_list) if orcids_list else None,  # Store ORCIDs
+            author_metadata=author_metadata,  # Store author countries and names
+            ai_journal_analysis=enriched_data.get("ai_journal_analysis"), # Store AI journal analysis
+            quartile=enriched_data.get("ai_journal_analysis", {}).get("quartile_estimate")[:2] if enriched_data.get("ai_journal_analysis") and enriched_data.get("ai_journal_analysis").get("quartile_estimate") else None, # Store Quartile
+            metrics_data=openalex_metrics if openalex_metrics else None,
+            metrics_last_updated=datetime.utcnow() if openalex_metrics else None,
             has_funding_ack=False,
             anid_report_status="Pending"
         )
@@ -350,12 +310,11 @@ async def upload_pdf(
         db.commit()
         db.refresh(new_pub)
         
-        # Create researcher-publication connections
-        from core.models import ResearcherPublication
+        # Create relations
         for author_id in enriched_data["matched_author_ids"]:
             connection = ResearcherPublication(
                 member_id=author_id,
-                publicacion_id=new_pub.id,
+                publication_id=new_pub.id, # Renamed
                 match_score=100,
                 match_method="text_match"
             )
@@ -363,51 +322,28 @@ async def upload_pdf(
         
         db.commit()
         
-        # ✅ NUEVO: Indexar en RAG inmediatamente
+        # RAG Indexing
         from services.rag_service import get_semantic_engine
-        
-        rag_result = {"success": False, "chunks_created": 0}
-        if enriched_data["text"] and len(enriched_data["text"]) > 100:
+        rag_result = {"success": False}
+        if new_pub.content and len(new_pub.content) > 100:
             try:
-                print(f"   [Upload] Indexing publication {new_pub.id} in RAG...")
                 engine = get_semantic_engine()
                 rag_result = engine.process_single_publication(new_pub.id)
-                
-                if rag_result.get("success"):
-                    print(f"   [Upload] Successfully indexed publication {new_pub.id}")
-                else:
-                    print(f"   [Upload] Warning: Failed to index publication {new_pub.id}: {rag_result.get('error')}")
             except Exception as e:
-                print(f"   [Upload] Warning: Exception while indexing publication {new_pub.id}: {e}")
-                rag_result = {"success": False, "error": str(e), "chunks_created": 0}
-        else:
-            print(f"   [Upload] Skipping RAG indexing for publication {new_pub.id} (insufficient text)")
-        
+                print(f"RAG Indexing failed: {e}")
+
         return {
             "id": new_pub.id,
             "status": "success",
-            "filename": file.filename,
-            "text_extracted": len(enriched_data["text"]) > 0,
-            "doi_detected": enriched_data["doi_url"] is not None,
-            "doi_url": enriched_data["doi_url"],
-            "authors_matched": len(enriched_data["matched_author_ids"]),
-            "author_names": author_names,
-            "summaries_generated": bool(enriched_data["resumen_es"]),
-            "processing_notes": enriched_data["processing_notes"],
-            
-            # ✅ NUEVO: Información de indexación RAG
-            "rag_indexed": rag_result.get("success", False),
-            "rag_chunks": rag_result.get("chunks_created", 0),
-            "rag_searchable": rag_result.get("now_searchable", False),
-            "rag_already_indexed": rag_result.get("already_indexed", False),
-            
-            "message": "PDF procesado y enriquecido exitosamente"
+            "message": "PDF uploaded and enriched successfully",
+            "rag_indexed": rag_result.get("success", False)
         }
+
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error procesando PDF: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
 
 
 @router.delete("/{pub_id}")
@@ -417,234 +353,51 @@ async def delete_publication(
     current_user: User = Depends(require_editor)
 ):
     """
-    Delete a publication and all its related data.
-    Requires Editor role.
+    Delete a publication and all its associated data (Manual Cleanup Strategy).
+    This ensures no foreign key constraint errors occur by removing children first.
     """
     try:
-        # Check if publication exists
+        # 1. Fetch Publication
         publication = db.query(Publication).filter(Publication.id == pub_id).first()
-        
         if not publication:
-            raise HTTPException(status_code=404, detail="Publicación no encontrada")
+            raise HTTPException(status_code=404, detail="Publication not found")
         
-        # Delete related data using legacy DB connection for chunks
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
+        local_path = publication.local_path
         
-        # Delete publication chunks (RAG data)
-        cursor.execute("DELETE FROM publication_chunks WHERE publicacion_id = ?", (pub_id,))
-        chunks_deleted = cursor.rowcount
+        # 2. Manual Cleanup of Children (Safety First)
+        # Delete Researcher Connections
+        db.query(ResearcherPublication).filter(ResearcherPublication.publication_id == pub_id).delete()
         
-        conn.commit()
-        conn.close()
+        # Delete Impact Metrics
+        db.query(PublicationImpact).filter(PublicationImpact.publication_id == pub_id).delete()
         
-        # Delete researcher-publication relationships (using SQLAlchemy)
-        from core.models import ResearcherPublication
-        db.query(ResearcherPublication).filter(
-            ResearcherPublication.publicacion_id == pub_id
-        ).delete()
+        # Delete RAG Chunks
+        from core.models import PublicationChunk
+        db.query(PublicationChunk).filter(PublicationChunk.publication_id == pub_id).delete()
         
-        # Delete the publication itself
+        # 3. Delete the Publication itself
         db.delete(publication)
         db.commit()
         
-        # Reload RAG embeddings if chunks were deleted
-        if chunks_deleted > 0:
+        # 4. File Deletion (Post-Commit to ensure DB consistency first)
+        if local_path and os.path.exists(local_path):
             try:
-                from services.rag_service import get_semantic_engine
-                engine = get_semantic_engine()
-                engine._load_publication_embeddings()
-                print(f"   [Delete] Reloaded RAG embeddings after deleting publication {pub_id}")
+                os.remove(local_path)
+                print(f"   [System] Deleted local PDF: {local_path}")
             except Exception as e:
-                print(f"   [Warning] Failed to reload RAG embeddings: {e}")
+                print(f"   [Warning] Could not delete file {local_path}: {e}")
+
+        return {"status": "success", "message": f"Publication {pub_id} deleted successfully"}
         
-        return {
-            "status": "success",
-            "message": f"Publicación {pub_id} eliminada exitosamente",
-            "chunks_deleted": chunks_deleted
-        }
-        
-    except HTTPException:
-        raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error eliminando publicación: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        print(f"CRITICAL DELETE ERROR: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error deleting publication: {str(e)}")
 
 
-@router.post("/{pub_id}/summary")
-async def generate_summary(
-    pub_id: int
-):
-    """Generate AI summary for a publication"""
-    from services.agent_service import CecanAgent
-    
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT * FROM Publicaciones WHERE id = ?", (pub_id,))
-    pub = cursor.fetchone()
-   
-    if not pub:
-        conn.close()
-        return {"error": "Publication not found"}
-    
-    text = pub['contenido_texto'] or pub['resumen']
-    
-    if not text:
-        conn.close()
-        return {"error": "No content available"}
-    
-    agent = CecanAgent()
-    prompt = f"Resume en 3-4 oraciones clave este artículo: {text[:2000]}"
-    summary = agent.send_message(prompt)
-    agent.close()
-    
-    cursor.execute("UPDATE Publicaciones SET summary_ai = ? WHERE id = ?", (summary, pub_id))
-    conn.commit()
-    conn.close()
-    
-    return {"summary": summary}
-
-
-from pydantic import BaseModel
-
-class PublicationUpdate(BaseModel):
-    canonical_doi: str | None = None
-
-@router.patch("/{pub_id}")
-async def update_publication(
-    pub_id: int,
-    update_data: PublicationUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_editor)
-):
-    """
-    Update publication details (currently only DOI).
-    Requires Editor role.
-    """
-    pub = db.query(Publication).filter(Publication.id == pub_id).first()
-    if not pub:
-        raise HTTPException(status_code=404, detail="Publicación no encontrada")
-    
-    if update_data.canonical_doi is not None:
-        # Clean DOI if necessary (remove https://doi.org/ prefix)
-        clean_doi = update_data.canonical_doi.strip()
-        if "doi.org/" in clean_doi:
-            clean_doi = clean_doi.split("doi.org/")[-1]
-            
-        pub.canonical_doi = clean_doi
-        # Also update origin URL if it was empty or autogenerated
-        if not pub.url_origen or "doi.org" in pub.url_origen:
-             pub.url_origen = f"https://doi.org/{clean_doi}"
-             
-    db.commit()
-    db.refresh(pub)
-    return pub
-
-@router.post("/{pub_id}/enrich-openalex")
-async def enrich_publication_with_openalex(
-    pub_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_editor)
-):
-    """
-    Enrich a publication with metrics from OpenAlex using its DOI.
-    Requires Editor role.
-    
-    Updates:
-    - PublicationImpact with citation count and collaboration status
-    - Publication.canonical_doi with normalized DOI
-    
-    Returns enriched metrics and OpenAlex data.
-    """
-    from services.openalex_service import (
-        get_publication_by_doi,
-        extract_doi_from_url,
-        detect_international_collab,
-        extract_journal_info,
-        get_openalex_id
-    )
-    from schemas import PublicationSummarySchema, PublicationUpdatet
-    from core.models import PublicationImpact
-    
-    try:
-        # 1. Get publication from database
-        publication = db.query(Publication).filter(Publication.id == pub_id).first()
-        
-        if not publication:
-            raise HTTPException(status_code=404, detail="Publicación no encontrada")
-        
-        # 2. Validate that publication has DOI
-        if not publication.url_origen:
-            raise HTTPException(
-                status_code=400,
-                detail="Publicación no tiene DOI. No se puede enriquecer con OpenAlex."
-            )
-        
-        # 3. Extract clean DOI
-        clean_doi = extract_doi_from_url(publication.url_origen)
-        print(f"[Enrich] Processing publication {pub_id} with DOI: {clean_doi}")
-        
-        # 4. Query OpenAlex API
-        openalex_data = get_publication_by_doi(clean_doi)
-        
-        # 5. Extract metrics
-        citation_count = openalex_data.get("cited_by_count", 0)
-        is_international = detect_international_collab(openalex_data)
-        journal_info = extract_journal_info(openalex_data)
-        openalex_id = get_openalex_id(openalex_data)
-        
-        # 6. Update or create PublicationImpact
-        impact = db.query(PublicationImpact).filter(
-            PublicationImpact.publication_id == pub_id
-        ).first()
-        
-        if not impact:
-            impact = PublicationImpact(publication_id=pub_id)
-            db.add(impact)
-            print(f"[Enrich] Creating new PublicationImpact for pub {pub_id}")
-        else:
-            print(f"[Enrich] Updating existing PublicationImpact for pub {pub_id}")
-        
-        # Update metrics
-        impact.citation_count = citation_count
-        impact.is_international_collab = is_international
-        
-        # 7. Update publication canonical_doi
-        publication.canonical_doi = clean_doi
-        
-        # 8. Commit changes
-        db.commit()
-        db.refresh(impact)
-        
-        print(f"[Enrich] ✅ Successfully enriched publication {pub_id}")
-        print(f"         Citations: {citation_count}, International: {is_international}")
-        
-        return {
-            "status": "success",
-            "publication_id": pub_id,
-            "doi": clean_doi,
-            "openalex_id": openalex_id,
-            "metrics": {
-                "citations": citation_count,
-                "is_international_collab": is_international
-            },
-            "journal": journal_info,
-            "message": f"Publicación enriquecida con {citation_count} citas desde OpenAlex"
-        }
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        print(f"[Enrich] ❌ Error: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error enriqueciendo publicación: {str(e)}"
-        )
-
-@router.patch("/{pub_id}")
+@router.patch("/{pub_id}", response_model=PublicationOut)
 async def update_publication(
     pub_id: int,
     pub_update: PublicationUpdate,
@@ -658,43 +411,289 @@ async def update_publication(
     if not pub:
         raise HTTPException(status_code=404, detail="Publication not found")
         
-    # Manual mapping of fields
+    # Manual mapping (handling optional updates)
     if pub_update.title is not None:
-        pub.titulo = pub_update.title
+        pub.title = pub_update.title
     if pub_update.year is not None:
-        pub.fecha = pub_update.year
+        pub.year = pub_update.year
     if pub_update.url is not None:
-        pub.url_origen = pub_update.url
+        pub.url = pub_update.url
     if pub_update.canonical_doi is not None:
         pub.canonical_doi = pub_update.canonical_doi
     
-    # Also support direct field names if passed
-    if pub_update.resumen_es is not None:
-        pub.resumen_es = pub_update.resumen_es
-    if pub_update.resumen_en is not None:
-        pub.resumen_en = pub_update.resumen_en
+    if pub_update.summary_es is not None:
+        pub.summary_es = pub_update.summary_es
+    if pub_update.summary_en is not None:
+        pub.summary_en = pub_update.summary_en
+    if pub_update.quartile is not None:
+        pub.quartile = pub_update.quartile
         
     # Handle author updates
     if pub_update.author_ids is not None:
-        # Delete existing connections
-        db.query(ResearcherPublication).filter(ResearcherPublication.publicacion_id == pub_id).delete()
+        # 1. Delete existing connections
+        db.query(ResearcherPublication).filter(ResearcherPublication.publication_id == pub_id).delete()
         
-        # Create new connections
+        # 2. Create new connections and collect names
+        new_author_names = []
         for member_id in pub_update.author_ids:
-            new_conn = ResearcherPublication(
-                publicacion_id=pub_id,
-                member_id=member_id,
-                match_method="manual",
-                match_score=100
-            )
-            db.add(new_conn)
+            # Verify member exists to avoid FK error
+            member = db.query(AcademicMember).filter(AcademicMember.id == member_id).first()
+            if member:
+                new_conn = ResearcherPublication(
+                    publication_id=pub_id, 
+                    member_id=member_id,
+                    match_method="manual",
+                    match_score=100
+                )
+                db.add(new_conn)
+                new_author_names.append(member.full_name)
+        
+        # 3. Update the cached 'authors' string field on the Publication model
+        if new_author_names:
+            pub.authors = ", ".join(new_author_names)
+        else:
+            pub.authors = ""
         
     db.commit()
     db.refresh(pub)
+    return pub
+
+
+@router.post("/{pub_id}/enrich-openalex")
+async def enrich_publication_with_openalex(
+    pub_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_editor)
+):
+    from services.openalex_service import (
+        get_publication_by_doi,
+        extract_doi_from_url,
+        detect_international_collab,
+        extract_journal_info,
+        get_openalex_id
+    )
+    
+    try:
+        pub = db.query(Publication).filter(Publication.id == pub_id).first()
+        if not pub:
+            raise HTTPException(status_code=404, detail="Publication not found")
+        
+        if not pub.url and not pub.canonical_doi:
+             raise HTTPException(status_code=400, detail="Publication has no DOI/URL")
+             
+        # Resolve DOI
+        doi_to_use = pub.canonical_doi or extract_doi_from_url(pub.url)
+        if not doi_to_use:
+             raise HTTPException(status_code=400, detail="Could not extract DOI")
+             
+        openalex_data = get_publication_by_doi(doi_to_use)
+        
+        # Update metrics
+        citation_count = openalex_data.get("cited_by_count", 0)
+        is_international = detect_international_collab(openalex_data)
+        
+        impact = db.query(PublicationImpact).filter(PublicationImpact.publication_id == pub_id).first()
+        if not impact:
+            impact = PublicationImpact(publication_id=pub_id)
+            db.add(impact)
+            
+        impact.citation_count = citation_count
+        impact.is_international_collab = is_international
+        
+        pub.canonical_doi = doi_to_use
+        
+        db.commit()
+        
+        return {
+            "status": "success",
+            "message": f"Enriched with {citation_count} citations",
+            "metrics": {"citations": citation_count}
+        }
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Enrichment error: {str(e)}")
+
+
+@router.post("/sync-metadata")
+async def sync_metadata_batch(
+    target_ids: list[int] = Body(None, embed=True),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_editor)
+):
+    """
+    Batch synchronize metadata (Title, Year, Metrics) from OpenAlex for all publications with DOIs.
+    """
+    from services.openalex_service import get_publication_by_doi, extract_publication_metadata
+    
+    query = db.query(Publication).filter(Publication.canonical_doi.isnot(None))
+    
+    pubs = query.all()
+    
+    updated_count = 0
+    errors_count = 0
+    
+    print(f"[Metadata Sync] Processing {len(pubs)} publications...")
+    
+    import time
+    
+    for pub in pubs:
+        # Check if target_ids is provided and filter manually (since we did all() above)
+        # Or better, filter in query.
+        if target_ids and pub.id not in target_ids:
+            continue
+
+        try:
+             # Basic rate limiting
+             time.sleep(0.2) 
+             
+             data = get_publication_by_doi(pub.canonical_doi)
+             if not data:
+                 raise ValueError("OpenAlex returned no data")
+             meta = extract_publication_metadata(data)
+             if not meta:
+                 raise ValueError("Could not extract metadata from OpenAlex response")
+             
+             # Updates
+             changed = False
+             
+             if meta.get("title") and meta["title"] != pub.title:
+                 print(f"   [Sync] Updating title ID {pub.id}: '{pub.title}' -> '{meta['title']}'")
+                 pub.title = meta["title"]
+                 changed = True
+                 
+             if meta.get("publication_year") and str(meta["publication_year"]) != pub.year:
+                 pub.year = str(meta["publication_year"])
+                 changed = True
+                 
+             # Always update metrics
+             pub.metrics_data = meta
+             pub.metrics_last_updated = datetime.utcnow()
+             pub.doi_verification_status = "valid_openalex"
+             
+             if changed or True: # Count as updated if we refreshed metrics
+                updated_count += 1
+             
+        except Exception as e:
+            print(f"Error syncing pub {pub.id} ({pub.canonical_doi}): {e}")
+            errors_count += 1
+            
+    db.commit()
     
     return {
-        "status": "success",
-        "message": "Publication updated",
-        "id": pub.id
+        "total_processed": len(pubs) if not target_ids else len(target_ids),
+        "updated": updated_count,
+        "errors": errors_count
     }
+
+
+@router.post("/{pub_id}/summary")
+def generate_summary(
+    pub_id: int, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_editor)
+):
+    """
+    Generate AI summaries (ES/EN) for a specific publication from its stored text content.
+    """
+    from services.publication_service import generate_summary_from_text
+    
+    pub = db.query(Publication).filter(Publication.id == pub_id).first()
+    if not pub:
+        raise HTTPException(status_code=404, detail="Publication not found")
+    
+    # Use text from database instead of reading PDF file
+    if not pub.content or len(pub.content) < 50:
+         raise HTTPException(status_code=400, detail="Publication has no text content in database")
+         
+    try:
+        from services.publication_service import analyze_text_with_ai
+        
+        # Call the unified analysis function
+        analysis = analyze_text_with_ai(pub.content)
+        
+        es = analysis.get("summary_es")
+        en = analysis.get("summary_en")
+        journal_analysis = analysis.get("journal_analysis")
+        
+        pub.summary_es = es
+        pub.summary_en = en
+        pub.ai_journal_analysis = journal_analysis # Save Journal Analysis
+        
+        # Save Quartile if found
+        if journal_analysis and journal_analysis.get("quartile_estimate"):
+            pub.quartile = journal_analysis.get("quartile_estimate")[:2] # Save extracted Q1/Q2/etc
+            
+        pub.ai_journal_analysis = journal_analysis # Save Journal Analysis
+        
+        db.commit()
+        
+        return {
+            "status": "success",
+            "summary_es": es,
+            "summary_en": en,
+            "ai_journal_analysis": journal_analysis
+        }
+    except Exception as e:
+        print(f"Error generating summary for pub {pub_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/search-openalex")
+def search_publications_in_openalex(
+    title: str = Body(..., embed=True),
+    limit: int = Body(5, embed=True),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_editor)
+):
+    """
+    Search for publications in OpenAlex by title.
+    Returns top candidates with similarity scores for manual confirmation.
+    """
+    from services.openalex_search_service import search_publications_by_title
+    
+    try:
+        candidates = search_publications_by_title(title, limit=limit)
+        
+        return {
+            "status": "success",
+            "query": title,
+            "candidates": candidates,
+            "count": len(candidates)
+        }
+    except Exception as e:
+        print(f"Error searching OpenAlex: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{pub_id}/link-openalex")
+def link_to_openalex(
+    pub_id: int,
+    openalex_data: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_editor)
+):
+    """
+    Link a publication to a confirmed OpenAlex work and sync all metadata.
+    """
+    from services.openalex_search_service import link_publication_to_openalex
+    
+    try:
+        success = link_publication_to_openalex(pub_id, openalex_data, db)
+        
+        if success:
+            return {
+                "status": "success",
+                "message": f"Publication {pub_id} linked to OpenAlex successfully"
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to link publication")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error linking to OpenAlex: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 

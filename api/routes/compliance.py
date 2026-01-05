@@ -7,7 +7,8 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from database.session import get_db
-from api.routes.auth import require_editor, require_viewer, User
+from core.security import require_editor, require_viewer
+from core.models import User
 from services import compliance_service
 
 router = APIRouter(prefix="/compliance", tags=["Compliance Audit"])

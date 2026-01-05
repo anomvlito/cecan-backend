@@ -1,21 +1,22 @@
-import sqlite3
-import csv
+
 import io
+import csv
 import re
 import sys
 import os
+from sqlalchemy.orm import Session
+from sqlalchemy import create_engine
 
 # Add project root to path
 sys.path.append(os.getcwd())
 
-try:
-    from backend.config import DB_PATH
-except ImportError:
-    DB_PATH = "backend/cecan.db"
+from core.models import (
+    Base, WorkPackage, Project, ProjectResearcher, Node, ProjectNode, 
+    ProjectOtherWP, AcademicMember, MemberType, Student, Thesis
+)
+from config import SQLALCHEMY_DATABASE_URL
 
-# He limpiado ligeramente los encabezados en el string para asegurar que se detecten bien.
-# Nota: Asegúrate que entre columnas visuales haya al menos 2 espacios en el string original 
-# o usa este bloque corregido:
+# RAW DATA (Unchanged content, just logic needed)
 RAW_DATA = """c|TITULO|Investigador responsable|Principales (8)|Otros investigadores|otros WP involucrados|COLORECTAL|MAMA|EXPERIENCIA|CUELLO UTERINO|GASTRICO|VESICULA|PULMON|EPA|BIOMARCADORES|SOCIEDAD CIVIL
 1|Modelamiento carga evitable|Paula Margozzini|Paula Margozzini|Pedro Zitko|2,4,5|X|X||X|X|X|X||||
 1|Piloto preventivo|Lorena Rodríguez|Lorena Rodríguez|María Jesús Vega, Kenny Low, Paulina Espinoza, Javiera Soto|2,4|X|X|X|X|X|X|X||||
@@ -64,175 +65,164 @@ RAW_DATA = """c|TITULO|Investigador responsable|Principales (8)|Otros investigad
 def normalize_name(name):
     if not name:
         return None
-    # Eliminamos espacios extra y normalizamos
     return name.strip().replace('  ', ' ')
 
-def create_schema(cursor):
-    cursor.executescript("""
-        DROP TABLE IF EXISTS Proyecto_Investigador;
-        DROP TABLE IF EXISTS Proyecto_Nodo;
-        DROP TABLE IF EXISTS Proyecto_OtroWP;
-        DROP TABLE IF EXISTS Proyectos;
-        DROP TABLE IF EXISTS Investigadores;
-        DROP TABLE IF EXISTS Nodos;
-        DROP TABLE IF EXISTS WPs;
+def get_or_create_investigator(session, name):
+    name = normalize_name(name)
+    if not name:
+        return None
+    
+    # Check if exists (assuming full_name is unique or close enough for seed)
+    member = session.query(AcademicMember).filter(AcademicMember.full_name == name).first()
+    if member:
+        return member
+    
+    # Create new
+    member = AcademicMember(
+        full_name=name,
+        member_type=MemberType.RESEARCHER,
+        institution="CECAN (Unknown)", # Placeholder
+        email=f"{name.lower().replace(' ', '.')}@example.com" # Placeholder email
+    )
+    session.add(member)
+    session.commit()
+    return member
 
-        CREATE TABLE WPs (
-            id INTEGER PRIMARY KEY,
-            nombre TEXT
-        );
+def get_or_create_node(session, name):
+    name = normalize_name(name)
+    node = session.query(Node).filter(Node.name == name).first()
+    if node:
+        return node
+    
+    node = Node(name=name)
+    session.add(node)
+    session.commit()
+    return node
 
-        CREATE TABLE Nodos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nombre TEXT UNIQUE
-        );
-
-        CREATE TABLE Investigadores (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nombre TEXT UNIQUE
-        );
-
-        CREATE TABLE Proyectos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            titulo TEXT,
-            wp_id INTEGER,
-            FOREIGN KEY(wp_id) REFERENCES WPs(id)
-        );
-
-        CREATE TABLE Proyecto_Investigador (
-            proyecto_id INTEGER,
-            investigador_id INTEGER,
-            rol TEXT,
-            FOREIGN KEY(proyecto_id) REFERENCES Proyectos(id),
-            FOREIGN KEY(investigador_id) REFERENCES Investigadores(id)
-        );
-
-        CREATE TABLE Proyecto_Nodo (
-            proyecto_id INTEGER,
-            nodo_id INTEGER,
-            FOREIGN KEY(proyecto_id) REFERENCES Proyectos(id),
-            FOREIGN KEY(nodo_id) REFERENCES Nodos(id)
-        );
-        
-        CREATE TABLE Proyecto_OtroWP (
-            proyecto_id INTEGER,
-            wp_id INTEGER,
-            FOREIGN KEY(proyecto_id) REFERENCES Proyectos(id),
-            FOREIGN KEY(wp_id) REFERENCES WPs(id)
-        );
-    """)
-
-    wps = [
+def seed_database():
+    print(f"🌱 Seeding database via {SQLALCHEMY_DATABASE_URL}")
+    engine = create_engine(SQLALCHEMY_DATABASE_URL)
+    
+    # DROP OLD SPANGLISH TABLES (Force Cleanup of Zombie Tables)
+    # These tables exist in the DB but are no longer in our Base.metadata models, 
+    # so drop_all() ignores them, causing FK constraints to block other drops.
+    old_tables = [
+        "investigador_publicacion",
+        "proyecto_investigador",
+        "proyecto_nodo",
+        "proyecto_otrowp",
+        "proyectos",
+        "nodos",
+        "wps",
+        "academic_members", # Force drop this too as it is a common dependency
+        "publications",
+    ]
+    
+    print("⚠️  Forcefully dropping old tables (CASCADE)...")
+    with engine.connect() as conn:
+        from sqlalchemy import text
+        for table in old_tables:
+            try:
+                conn.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
+                print(f"   - Dropped {table}")
+            except Exception as e:
+                print(f"   - Could not drop {table}: {e}")
+        conn.commit()
+    
+    # NOW standard drop and create
+    print("⚠️  Dropping any remaining tables...")
+    Base.metadata.drop_all(bind=engine)
+    print("✨ Creating all tables...")
+    Base.metadata.create_all(bind=engine)
+    
+    session = Session(bind=engine)
+    
+    # 1. Seed Work Packages
+    print("📦 Seeding Work Packages...")
+    wps_data = [
         (1, 'Prevención'),
         (2, 'Optimización de trayectoria'),
         (3, 'Innovación y medicina personalizada'),
         (4, 'Investigación en políticas públicas'),
         (5, 'Data para la acción')
     ]
-    cursor.executemany("INSERT INTO WPs (id, nombre) VALUES (?, ?)", wps)
-
-def get_or_create_investigator(cursor, name):
-    name = normalize_name(name)
-    if not name:
-        return None
+    for wp_id, wp_name in wps_data:
+        wp = WorkPackage(id=wp_id, name=wp_name)
+        session.add(wp)
+    session.commit()
     
-    cursor.execute("SELECT id FROM Investigadores WHERE nombre = ?", (name,))
-    row = cursor.fetchone()
-    if row:
-        return row[0]
-    
-    cursor.execute("INSERT INTO Investigadores (nombre) VALUES (?)", (name,))
-    return cursor.lastrowid
-
-def get_or_create_nodo(cursor, name):
-    name = normalize_name(name)
-    cursor.execute("SELECT id FROM Nodos WHERE nombre = ?", (name,))
-    row = cursor.fetchone()
-    if row:
-        return row[0]
-    cursor.execute("INSERT INTO Nodos (nombre) VALUES (?)", (name,))
-    return cursor.lastrowid
-
-def process_data():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    create_schema(cursor)
-    
-    # --- CORRECCIÓN IMPORTANTE ---
-    # Usamos el RAW_DATA pre-procesado con pipes '|' para evitar ambigüedad con los espacios
+    # 2. Process CSV Data
+    print("📄 Processing Project Data...")
     reader = csv.DictReader(io.StringIO(RAW_DATA), delimiter='|')
-    
     node_headers = ['COLORECTAL', 'MAMA', 'EXPERIENCIA', 'CUELLO UTERINO', 'GASTRICO', 'VESICULA', 'PULMON', 'EPA', 'BIOMARCADORES', 'SOCIEDAD CIVIL']
 
     for row in reader:
         try:
-            # Usamos .strip() porque a veces quedan espacios invisibles
-            wp_val = row['c'].strip()
-            if not wp_val: continue 
+            wp_val = row.get('c', '').strip()
+            if not wp_val: continue
             wp_id = int(wp_val)
-        except (ValueError, KeyError) as e:
-            print(f"Error saltando fila: {e} en fila: {row}")
-            continue 
+        except (ValueError, KeyError):
+            continue
             
-        titulo = row['TITULO'].strip()
+        titulo = row.get('TITULO', '').strip()
         
-        cursor.execute("INSERT INTO Proyectos (titulo, wp_id) VALUES (?, ?)", (titulo, wp_id))
-        project_id = cursor.lastrowid
+        # Create Project
+        project = Project(title=titulo, wp_id=wp_id)
+        session.add(project)
+        session.commit()
         
-        # Procesar Investigadores
+        # Researchers
         resp_name = row.get('Investigador responsable')
         if resp_name:
-            inv_id = get_or_create_investigator(cursor, resp_name)
-            if inv_id: # Check extra de seguridad
-                cursor.execute("INSERT INTO Proyecto_Investigador (proyecto_id, investigador_id, rol) VALUES (?, ?, ?)", 
-                           (project_id, inv_id, 'Responsable'))
-            
+            inv = get_or_create_investigator(session, resp_name)
+            if inv:
+                # Add relation
+                rel = ProjectResearcher(project_id=project.id, member_id=inv.id, role='Responsable')
+                session.add(rel)
+                
         # Principales
         principales = row.get('Principales (8)')
         if principales:
-            # Mejoramos el split para soportar ' y ' y ','
             names = re.split(r',| y ', principales)
             for name in names:
-                inv_id = get_or_create_investigator(cursor, name)
-                if inv_id:
-                    cursor.execute("INSERT INTO Proyecto_Investigador (proyecto_id, investigador_id, rol) VALUES (?, ?, ?)", 
-                                (project_id, inv_id, 'Principal'))
-
+                inv = get_or_create_investigator(session, name)
+                if inv:
+                    rel = ProjectResearcher(project_id=project.id, member_id=inv.id, role='Principal')
+                    session.add(rel)
+        
         # Otros
         otros = row.get('Otros investigadores')
         if otros:
             names = re.split(r',| y ', otros)
             for name in names:
-                inv_id = get_or_create_investigator(cursor, name)
-                if inv_id:
-                    cursor.execute("INSERT INTO Proyecto_Investigador (proyecto_id, investigador_id, rol) VALUES (?, ?, ?)", 
-                                (project_id, inv_id, 'Colaborador'))
-                                
-        # Nodos
+                inv = get_or_create_investigator(session, name)
+                if inv:
+                    rel = ProjectResearcher(project_id=project.id, member_id=inv.id, role='Colaborador')
+                    session.add(rel)
+
+        # Nodes
         for header in node_headers:
             val = row.get(header)
             if val and val.strip().lower() == 'x':
-                nodo_id = get_or_create_nodo(cursor, header)
-                cursor.execute("INSERT INTO Proyecto_Nodo (proyecto_id, nodo_id) VALUES (?, ?)", (project_id, nodo_id))
+                node = get_or_create_node(session, header)
+                rel = ProjectNode(project_id=project.id, node_id=node.id)
+                session.add(rel)
                 
-        # Otros WPs
+        # Other WPs
         otros_wps = row.get('otros WP involucrados')
         if otros_wps:
-            ids = otros_wps.replace(' ', '').split(',')
+            ids = outros_wps = otros_wps.replace(' ', '').split(',')
             for wp_id_str in ids:
                 if wp_id_str.isdigit():
-                    cursor.execute("INSERT INTO Proyecto_OtroWP (proyecto_id, wp_id) VALUES (?, ?)", (project_id, int(wp_id_str)))
+                    rel = ProjectOtherWP(project_id=project.id, wp_id=int(wp_id_str))
+                    session.add(rel)
+        session.commit()
 
-    conn.commit()
-    
-    print("Base de datos creada exitosamente.")
-    cursor.execute("SELECT COUNT(*) FROM Proyectos")
-    print(f"Proyectos: {cursor.fetchone()[0]}")
-    cursor.execute("SELECT COUNT(*) FROM Investigadores")
-    print(f"Investigadores: {cursor.fetchone()[0]}")
-    
-    conn.close()
+    print("✅ Database Seeded Successfully!")
+    count_projects = session.query(Project).count()
+    count_members = session.query(AcademicMember).count()
+    print(f"📊 Stats: {count_projects} Projects, {count_members} Researchers")
+    session.close()
 
 if __name__ == "__main__":
-    process_data()
+    seed_database()

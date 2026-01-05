@@ -39,12 +39,13 @@ def build_graph_data(db: Session):
         # Base size 25 + impact (max 45)
         node_size = 20 + (impact_score * 0.25)
         
-        # WPs list
-        wps_list = [{"id": wp.id, "nombre": wp.nombre} for wp in member.wps]
+        # WPs list (Updated to use 'name' instead of 'nombre')
+        wps_list = [{"id": wp.id, "name": wp.name} for wp in member.wps]
         
         metadata = {
             "type": "Investigador",
-            "nombre": member.full_name,
+            "name": member.full_name, # Renamed key for consistency, but frontend might expect 'nombre'
+            "nombre": member.full_name, # Keep 'nombre' for frontend compatibility if needed
             "email": member.email,
             "institution": member.institution,
             "wp": member.wp_id,
@@ -53,7 +54,8 @@ def build_graph_data(db: Session):
             "citations": details.citaciones_totales if details else None,
             "h_index": details.indice_h if details else None,
             "photo": details.url_foto if details else None,
-            "impact_score": impact_score
+            "impact_score": impact_score,
+            "orcid": details.orcid if details else None  # Add ORCID for badge display
         }
         
         add_node(
@@ -72,9 +74,9 @@ def build_graph_data(db: Session):
         add_node(
             node_id,
             label=f"WP {wp.id}",
-            title=wp.nombre,
+            title=wp.name, # Renamed from nombre
             group="wp",
-            data={"type": "WP", "nombre": wp.nombre},
+            data={"type": "WP", "nombre": wp.name, "name": wp.name},
             size=50,
             color="#818cf8",
             shape="circle",
@@ -87,9 +89,9 @@ def build_graph_data(db: Session):
         node_id = f"nodo_{node.id}"
         add_node(
             node_id,
-            label=node.nombre,
+            label=node.name, # Renamed from nombre
             group="nodo",
-            data={"type": "Nodo", "nombre": node.nombre},
+            data={"type": "Nodo", "nombre": node.name, "name": node.name},
             color="#67e8f9",
             shape="box"
         )
@@ -98,13 +100,14 @@ def build_graph_data(db: Session):
     projects = db.query(Project).all()
     for proj in projects:
         node_id = f"proj_{proj.id}"
-        label = proj.titulo[:30] + "..." if len(proj.titulo) > 30 else proj.titulo
+        # Renamed from titulo -> title
+        label = proj.title[:30] + "..." if len(proj.title) > 30 else proj.title
         add_node(
             node_id,
             label=label,
-            title=proj.titulo,
+            title=proj.title,
             group="project",
-            data={"type": "Proyecto", "nombre": proj.titulo},
+            data={"type": "Proyecto", "nombre": proj.title, "title": proj.title},
             color="#6ee7b7"
         )
 
@@ -116,7 +119,7 @@ def build_graph_data(db: Session):
         # Edge: Project -> Researcher
         for pr in proj.researcher_connections:
             target_inv_id = f"inv_{pr.member_id}"
-            is_responsable = pr.rol == 'Responsable'
+            is_responsable = pr.role == 'Responsable' # Renamed from rol
             add_edge(
                 node_id, 
                 target_inv_id,
@@ -126,7 +129,8 @@ def build_graph_data(db: Session):
             
         # Edge: Project -> Node
         for pn in proj.node_connections:
-            target_node_id = f"nodo_{pn.nodo_id}"
+            # Renamed from nodo_id -> node_id
+            target_node_id = f"nodo_{pn.node_id}"
             add_edge(node_id, target_node_id, color={"color": "#a5f3fc", "opacity": 0.5}, width=1)
 
     return {"nodes": nodes, "edges": edges}

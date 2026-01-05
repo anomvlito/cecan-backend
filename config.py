@@ -15,8 +15,13 @@ DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "cecan.db"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if DATABASE_URL:
+    print(f"✅ USING DATABASE FROM ENV: {DATABASE_URL}")
     SQLALCHEMY_DATABASE_URL = DATABASE_URL
 else:
+    print(f"⚠️  WARNING: DATABASE_URL not found. Falling back to SQLite: {DB_PATH}")
+    # Force print to stderr as well to be seen in logs
+    import sys
+    print(f"⚠️  WARNING: DATABASE_URL not found. Falling back to SQLite: {DB_PATH}", file=sys.stderr)
     SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_PATH}"
 
 # Security

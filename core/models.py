@@ -73,6 +73,9 @@ class Publication(Base):
     
     # Metadata Enrichment
     extracted_orcids = Column(Text, nullable=True)  # Comma-separated list of ORCIDs found in PDF
+    author_metadata = Column(JSON, nullable=True)  # Stores author names and countries from ORCID API
+    ai_journal_analysis = Column(JSON, nullable=True)  # AI-extracted journal metadata and quartile estimation
+    quartile = Column(String(10), nullable=True, index=True) # Dedicated column for filtering (Q1, Q2, Q3, Q4)
 
     # COMPLIANCE AUDIT FIELDS (El Robot)
     has_valid_affiliation = Column(Boolean, default=False, nullable=False)
@@ -92,7 +95,7 @@ class Publication(Base):
     metrics_last_updated = Column(DateTime, nullable=True)
 
     # Relationships
-    researcher_connections = relationship("ResearcherPublication", back_populates="publication")
+    researcher_connections = relationship("ResearcherPublication", back_populates="publication", cascade="all, delete-orphan")
     chunks = relationship("PublicationChunk", back_populates="publication", cascade="all, delete-orphan")
     impact_metrics = relationship("PublicationImpact", uselist=False, back_populates="publication", cascade="all, delete-orphan")
 
@@ -120,7 +123,7 @@ class AcademicMember(Base):
     member_type = Column(String(50), nullable=False)
     
     # WP Affiliation (Everyone belongs to a WP)
-    wp_id = Column(Integer, ForeignKey("wps.id"), nullable=True)
+    wp_id = Column(Integer, ForeignKey("work_packages.id"), nullable=True)
     
     # Computed/Status fields
     is_active = Column(Boolean, default=True)
@@ -147,7 +150,7 @@ class MemberWP(Base):
     __tablename__ = "member_wps"
     
     member_id = Column(Integer, ForeignKey("academic_members.id"), primary_key=True)
-    wp_id = Column(Integer, ForeignKey("wps.id"), primary_key=True)
+    wp_id = Column(Integer, ForeignKey("work_packages.id"), primary_key=True)
 
 
 class ResearcherDetails(Base):
@@ -214,11 +217,11 @@ class MeetingMinute(Base):
     __tablename__ = "meeting_minutes"
     
     id = Column(Integer, primary_key=True, index=True)
-    fecha = Column(DateTime, nullable=False, default=datetime.utcnow)
-    titulo = Column(String(255), nullable=True)  # Optional meeting title
+    date = Column(DateTime, nullable=False, default=datetime.utcnow)  # Renamed from fecha
+    title = Column(String(255), nullable=True)  # Renamed from titulo
     audio_path = Column(Text, nullable=True)  # Path to audio file
     transcription_text = Column(Text, nullable=True)  # Full transcription
-    resumen_ia = Column(Text, nullable=True)  # AI-generated summary
+    ai_summary = Column(Text, nullable=True)  # Renamed from resumen_ia
     
     # Metadata
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
@@ -277,10 +280,10 @@ class PublicationImpact(Base):
 
 class WorkPackage(Base):
     """Work packages (WP) - thematic research groups."""
-    __tablename__ = "wps"
+    __tablename__ = "work_packages"
     
     id = Column(Integer, primary_key=True)
-    nombre = Column(String(255), nullable=False)
+    name = Column(String(255), nullable=False) # Renamed from nombre
     
     # Relationships
     projects = relationship("Project", back_populates="wp")
@@ -290,11 +293,11 @@ class WorkPackage(Base):
 
 class Project(Base):
     """Research projects."""
-    __tablename__ = "proyectos"
+    __tablename__ = "projects"
     
     id = Column(Integer, primary_key=True, index=True)
-    titulo = Column(Text, nullable=False)
-    wp_id = Column(Integer, ForeignKey("wps.id"), nullable=True)
+    title = Column(Text, nullable=False) # Renamed from titulo
+    wp_id = Column(Integer, ForeignKey("work_packages.id"), nullable=True)
     
     # Relationships
     wp = relationship("WorkPackage", back_populates="projects")
@@ -305,12 +308,12 @@ class Project(Base):
 
 class ProjectResearcher(Base):
     """Many-to-many relationship between projects and academic members (researchers)."""
-    __tablename__ = "proyecto_investigador"
+    __tablename__ = "project_researchers"
     
     id = Column(Integer, primary_key=True, index=True)
-    proyecto_id = Column(Integer, ForeignKey("proyectos.id"), nullable=False)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
     member_id = Column(Integer, ForeignKey("academic_members.id"), nullable=False)
-    rol = Column(String(50), nullable=True)  # e.g., "Responsable", "Principal", "Colaborador"
+    role = Column(String(50), nullable=True)  # Renamed from rol
     
     # Relationships
     project = relationship("Project", back_populates="researcher_connections")
@@ -319,11 +322,11 @@ class ProjectResearcher(Base):
 
 class ResearcherPublication(Base):
     """Many-to-many relationship between academic members and publications."""
-    __tablename__ = "investigador_publicacion"
+    __tablename__ = "researcher_publications"
     
     id = Column(Integer, primary_key=True, index=True)
     member_id = Column(Integer, ForeignKey("academic_members.id"), nullable=False)
-    publicacion_id = Column(Integer, ForeignKey("publications.id"), nullable=False)
+    publication_id = Column(Integer, ForeignKey("publications.id"), nullable=False)
     match_score = Column(Integer, nullable=True)  # 0-100 confidence score
     match_method = Column(String(50), nullable=True)  # e.g., "exact_name", "fuzzy_match"
     
@@ -334,10 +337,10 @@ class ResearcherPublication(Base):
 
 class Node(Base):
     """Thematic nodes (cancer types and cross-cutting themes)."""
-    __tablename__ = "nodos"
+    __tablename__ = "nodes"
     
     id = Column(Integer, primary_key=True, index=True)
-    nombre = Column(String(255), unique=True, nullable=False)
+    name = Column(String(255), unique=True, nullable=False) # Renamed from nombre
     
     # Relationships
     project_connections = relationship("ProjectNode", back_populates="node")
@@ -345,11 +348,11 @@ class Node(Base):
 
 class ProjectNode(Base):
     """Many-to-many relationship between projects and nodes."""
-    __tablename__ = "proyecto_nodo"
+    __tablename__ = "project_nodes"
     
     id = Column(Integer, primary_key=True, index=True)
-    proyecto_id = Column(Integer, ForeignKey("proyectos.id"), nullable=False)
-    nodo_id = Column(Integer, ForeignKey("nodos.id"), nullable=False)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    node_id = Column(Integer, ForeignKey("nodes.id"), nullable=False)
     
     # Relationships
     project = relationship("Project", back_populates="node_connections")
@@ -358,11 +361,11 @@ class ProjectNode(Base):
 
 class ProjectOtherWP(Base):
     """Many-to-many relationship for collaborative WP connections."""
-    __tablename__ = "proyecto_otrowp"
+    __tablename__ = "project_other_wps"
     
     id = Column(Integer, primary_key=True, index=True)
-    proyecto_id = Column(Integer, ForeignKey("proyectos.id"), nullable=False)
-    wp_id = Column(Integer, ForeignKey("wps.id"), nullable=False)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    wp_id = Column(Integer, ForeignKey("work_packages.id"), nullable=False)
     
     # Relationships
     project = relationship("Project", back_populates="other_wp_connections")
@@ -377,7 +380,7 @@ class PublicationChunk(Base):
     __tablename__ = "publication_chunks"
     
     id = Column(Integer, primary_key=True, index=True)
-    publicacion_id = Column(Integer, ForeignKey("publications.id"), nullable=False)
+    publication_id = Column(Integer, ForeignKey("publications.id"), nullable=False)
     chunk_index = Column(Integer, nullable=False)  # Sequential index within document
     content = Column(Text, nullable=False)
     embedding = Column(Text, nullable=True)  # Serialized vector (BLOB in SQLite, or JSON)
@@ -387,19 +390,88 @@ class PublicationChunk(Base):
 
 
 # ===========================
+# STUDENT MANAGEMENT & THESES
+# ===========================
+
+class StudentProgram(str, enum.Enum):
+    """Programs offered by CECAN."""
+    MAGISTER = "Magister"
+    DOCTORADO = "Doctorado"
+    POSTDOC = "Postdoctorado"
+    OTHER = "Other"
+
+class StudentStatus(str, enum.Enum):
+    """Student academic status."""
+    ACTIVE = "Activo"
+    GRADUATED = "Graduado"
+    WITHDRAWN = "Retirado"
+    SUSPENDED = "Suspendido"
+
+class ThesisStatus(str, enum.Enum):
+    """Thesis progress status."""
+    PROPOSAL = "Propuesta"
+    DRAFT = "Borrador"
+    DEFENSE_PENDING = "Defensa Pendiente"
+    APPROVED = "Aprobada"
+
+class Student(Base):
+    """Students supervised by CECAN members."""
+    __tablename__ = "students"
+
+    id = Column(Integer, primary_key=True, index=True)
+    full_name = Column(String(255), nullable=False)
+    email = Column(String(255), nullable=True)
+    rut = Column(String(20), nullable=True)  # Chilean ID
+    
+    program = Column(SQLEnum(StudentProgram), nullable=False, default=StudentProgram.OTHER)
+    university = Column(String(255), nullable=True)
+    start_date = Column(DateTime, nullable=True)
+    graduation_date = Column(DateTime, nullable=True)
+    
+    status = Column(SQLEnum(StudentStatus), default=StudentStatus.ACTIVE, nullable=False)
+    
+    # Relationships
+    tutor_id = Column(Integer, ForeignKey("academic_members.id"), nullable=True)
+    tutor = relationship("AcademicMember", foreign_keys=[tutor_id], backref="students_supervised")
+    
+    co_tutor_id = Column(Integer, ForeignKey("academic_members.id"), nullable=True)
+    co_tutor = relationship("AcademicMember", foreign_keys=[co_tutor_id], backref="students_co_supervised")
+    
+    theses = relationship("Thesis", back_populates="student", cascade="all, delete-orphan")
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    @property
+    def tutor_name(self):
+        return self.tutor.full_name if self.tutor else None
+
+
+class Thesis(Base):
+    """Theses produced by students."""
+    __tablename__ = "theses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(Text, nullable=False)
+    abstract = Column(Text, nullable=True)
+    
+    student_id = Column(Integer, ForeignKey("students.id"), nullable=False)
+    student = relationship("Student", back_populates="theses")
+    
+    status = Column(SQLEnum(ThesisStatus), default=ThesisStatus.PROPOSAL, nullable=False)
+    defense_date = Column(DateTime, nullable=True)
+    file_url = Column(String(500), nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# ===========================
 # DATABASE SETUP UTILITIES
 # ===========================
 
-def get_engine(db_path="cecan.db"):
-    """Create SQLAlchemy engine."""
-    return create_engine(f"sqlite:///{db_path}", echo=False)
-
-
-def get_session(db_path="cecan.db"):
-    """Get database session."""
-    engine = get_engine(db_path)
-    Session = sessionmaker(bind=engine)
-    return Session()
+# LEGACY SQLITE FUNCTIONS REMOVED TO PREVENT CONFUSION
+# Please use database.session.get_session instead
 
 
 def create_all_tables(db_path="cecan.db"):

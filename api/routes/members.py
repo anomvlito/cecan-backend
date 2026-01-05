@@ -5,9 +5,11 @@ import json
 from sqlalchemy.orm import Session
 from typing import List
 
-from core.models import get_session, AcademicMember, ResearcherDetails, StudentDetails, MemberType
+from core.models import AcademicMember, ResearcherDetails, StudentDetails, MemberType
+from database.session import get_session
 from schemas import AcademicMemberCreate, AcademicMemberUpdate, AcademicMemberOut
-from api.routes.auth import require_editor, User, get_current_user
+from core.security import require_editor, get_current_user
+from core.models import User
 
 router = APIRouter(prefix="/members", tags=["Members"])
 

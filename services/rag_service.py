@@ -9,7 +9,7 @@ from pathlib import Path
 # Database
 from database.session import get_session
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import text, func
 from core.models import (
     Project, WorkPackage, AcademicMember, ProjectResearcher, 
     Publication, PublicationChunk, ResearcherPublication
@@ -133,25 +133,25 @@ class SemanticSearchEngine:
             project_data = []
             for p in projects:
                 # Build context string
-                wp_name = p.wp.nombre if p.wp else "Sin WP"
+                wp_name = p.wp.name if p.wp else "Sin WP"
                 
                 # Researchers
                 researchers_txt = []
                 for pr in p.researcher_connections:
                     name = pr.member.full_name
-                    role = pr.rol or "Miembro"
+                    role = pr.role or "Miembro"
                     researchers_txt.append(f"{name} ({role})")
                 
                 # Nodes
-                nodes_txt = [pn.node.nombre for pn in p.node_connections]
+                nodes_txt = [pn.node.name for pn in p.node_connections]
                 
-                full_text = f"Título: {p.titulo}. WP: {wp_name}. Nodos: {', '.join(nodes_txt)}. Investigadores: {', '.join(researchers_txt)}"
+                full_text = f"Título: {p.title}. WP: {wp_name}. Nodos: {', '.join(nodes_txt)}. Investigadores: {', '.join(researchers_txt)}"
                 
                 project_data.append({
                     "metadata": {
                         "id": p.id,
-                        "titulo": p.titulo,
-                        "wp_nombre": wp_name
+                        "title": p.title,
+                        "wp_name": wp_name
                     },
                     "text": full_text
                 })
@@ -165,7 +165,9 @@ class SemanticSearchEngine:
         # Check if persisted index exists
         if VECTORSTORE_PATH.exists() and (VECTORSTORE_PATH / "index.faiss").exists():
             print("   [System] Loading existing project embeddings from disk...")
-            self._load_embeddings_from_disk()
+            print("   [System] FAISS caching disabled (libs missing). Generating embeddings in memory...")
+            # self._load_embeddings_from_disk()
+            self._generate_and_save_embeddings()
         else:
             print("   [System] No cached embeddings found. Generating and saving new embeddings...")
             self._generate_and_save_embeddings()
@@ -220,7 +222,8 @@ class SemanticSearchEngine:
             print(f"   [System] Generated embeddings for {len(self.projects)} projects.")
             
             # Save to FAISS index
-            self._save_embeddings_to_disk()
+            # self._save_embeddings_to_disk()
+            print("   [System] Skipping disk save (FAISS missing).")
             
         except Exception as e:
             print(f"   [Error] Failed to generate project embeddings: {e}")
@@ -276,7 +279,7 @@ class SemanticSearchEngine:
                         embedding = json.loads(chunk.embedding)
                         self.pub_chunks.append({
                             "id": chunk.id,
-                            "publicacion_id": chunk.publicacion_id,
+                            "publication_id": chunk.publication_id,
                             "content": chunk.content
                         })
                         self.pub_embeddings.append(embedding)
@@ -310,15 +313,15 @@ class SemanticSearchEngine:
             if not pub:
                 return {"success": False, "error": "Publication not found"}
             
-            title = pub.titulo
-            content = pub.contenido_texto
+            title = pub.title
+            content = pub.content
             
             # 2. Validate content
             if not content or len(content) < 100:
                 return {"success": False, "error": "Insufficient content (menos de 100 caracteres)", "chunks_created": 0}
             
             # 3. Check if already processed
-            existing_chunks = session.query(func.count(PublicationChunk.id)).filter(PublicationChunk.publicacion_id == pub_id).scalar()
+            existing_chunks = session.query(func.count(PublicationChunk.id)).filter(PublicationChunk.publication_id == pub_id).scalar()
             if existing_chunks > 0:
                 print(f"   [RAG] Publication {pub_id} already indexed with {existing_chunks} chunks")
                 return {"success": True, "already_indexed": True, "chunks_created": existing_chunks}
@@ -353,7 +356,7 @@ class SemanticSearchEngine:
                     )['embedding']
                     
                     new_chunk = PublicationChunk(
-                        publicacion_id=pub_id,
+                        publication_id=pub_id,
                         chunk_index=idx,
                         content=chunk,
                         embedding=json.dumps(emb)
@@ -407,19 +410,19 @@ class SemanticSearchEngine:
             # Get publications with text content that are not fully chunked
             # Simplified: just get all with content and check one by one (as before)
             # or usage exclusion join. For now, stick to original logic: check count for each.
-            pubs = session.query(Publication).filter(Publication.contenido_texto.isnot(None), Publication.contenido_texto != '').all()
+            pubs = session.query(Publication).filter(Publication.content.isnot(None), Publication.content != '').all()
             
             count = 0
             errors = 0
             
             for pub in pubs:
                 pub_id = pub.id
-                title = pub.titulo
-                content = pub.contenido_texto
+                title = pub.title
+                content = pub.content
                 
                 try:
                     # Check if already chunked
-                    existing_chunks = session.query(func.count(PublicationChunk.id)).filter(PublicationChunk.publicacion_id == pub_id).scalar()
+                    existing_chunks = session.query(func.count(PublicationChunk.id)).filter(PublicationChunk.publication_id == pub_id).scalar()
                     if existing_chunks > 0:
                         continue
                         
@@ -470,7 +473,7 @@ class SemanticSearchEngine:
                             continue
                         try:
                             new_chunk = PublicationChunk(
-                                publicacion_id=pub_id,
+                                publication_id=pub_id,
                                 chunk_index=i,
                                 content=chunk,
                                 embedding=json.dumps(emb)
@@ -575,7 +578,7 @@ class SemanticSearchEngine:
             session = get_session()
             try:
                 results = (
-                    session.query(ResearcherPublication.publicacion_id)
+                    session.query(ResearcherPublication.publication_id)
                     .join(AcademicMember, ResearcherPublication.member_id == AcademicMember.id)
                     .filter(AcademicMember.full_name.ilike(f"%{researcher_name}%"))
                     .all()
@@ -590,7 +593,7 @@ class SemanticSearchEngine:
             # 2. Filter chunks and embeddings
             filtered_indices = []
             for i, chunk in enumerate(self.pub_chunks):
-                if chunk['publicacion_id'] in pub_ids:
+                if chunk['publication_id'] in pub_ids:
                     filtered_indices.append(i)
             
             if not filtered_indices:

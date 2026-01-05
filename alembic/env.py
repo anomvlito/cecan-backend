@@ -12,7 +12,7 @@ sys.path.append(os.getcwd())
 
 # Import your models' Base here so autogenerate can find them
 from core.models import Base
-from config import BASE_DIR
+from config import BASE_DIR, SQLALCHEMY_DATABASE_URL
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -27,11 +27,8 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Set the SQLAlchemy URL from the environment variable
-# This overrides whatever is in alembic.ini
-db_url = os.getenv("DATABASE_URL")
-if db_url:
-    config.set_main_option("sqlalchemy.url", db_url)
+# Set the SQLAlchemy URL from config.py (handles SQLite fallback)
+config.set_main_option("sqlalchemy.url", SQLALCHEMY_DATABASE_URL)
 
 # add your model's MetaData object here
 # for 'autogenerate' support

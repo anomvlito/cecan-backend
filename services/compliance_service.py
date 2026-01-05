@@ -23,7 +23,7 @@ def run_full_audit(db: Session) -> None:
     }
     
     for pub in publications:
-        text = pub.contenido_texto if pub.contenido_texto else ""
+        text = pub.content if pub.content else ""
         
         # Búsqueda de patrones
         has_fondap = bool(re.search(patterns["FONDAP"], text, re.IGNORECASE))
@@ -81,7 +81,7 @@ def audit_publication_by_id(pub_id: int, db: Session) -> None:
         "ANID": r"ANID|Agencia Nacional"
     }
 
-    text = pub.contenido_texto if pub.contenido_texto else ""
+    text = pub.content if pub.content else ""
     
     has_fondap = bool(re.search(patterns["FONDAP"], text, re.IGNORECASE))
     has_cecan = bool(re.search(patterns["CECAN"], text, re.IGNORECASE))

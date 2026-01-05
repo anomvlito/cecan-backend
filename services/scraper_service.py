@@ -1,13 +1,10 @@
 import requests
 from bs4 import BeautifulSoup
-
-import sqlite3
 import time
 import random
 import json
 import sys
 import os
-from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from pypdf import PdfReader
 from tenacity import (
@@ -16,10 +13,13 @@ from tenacity import (
     wait_random_exponential,
     retry_if_exception_type,
 )
+from sqlalchemy.orm import Session
 
 # Add parent directory to path to import backend modules if needed
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import DB_PATH
+from database.session import SessionLocal
+from core.models import Publication, AcademicMember, ResearcherDetails
 
 # Get the project root directory (parent of backend)
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -75,75 +75,41 @@ def scrape_cecan_publications():
         
         publications = []
         
-        # Based on the user's image and typical WordPress structures
-        # We need to find the articles. 
-        # Looking at the provided text dump, it seems to be a list.
-        # Let's assume a standard article or div structure.
-        # We will look for elements that contain "Ver detalles" or "Descargar"
-        
-        # Strategy: Find all "Descargar" links, then find the parent container to get the title and date.
-        
+        # Based on existing strategy
         download_buttons = soup.find_all('a', string=lambda t: t and "Descargar" in t)
         
         for btn in download_buttons:
             try:
-                # The structure seems to be: 
-                # Container -> Date
-                #           -> Title
-                #           -> Buttons (Details, Download)
-                
-                # Let's traverse up to find the container
-                # Usually the button is in a div, which is in the main article container
-                container = btn.find_parent('article') or btn.find_parent('div', class_='publication-item') # Hypothetical class
-                
-                # If we can't find a specific container, let's try to find the closest header
+                container = btn.find_parent('article') or btn.find_parent('div', class_='publication-item')
                 if not container:
-                    # Fallback: Go up 2-3 levels
                     container = btn.parent.parent
                 
-                # Extract Title
                 title_tag = container.find('h3') or container.find('h4') or container.find('h2')
-                if not title_tag:
-                    # Try finding previous sibling elements if structure is flat
-                    pass
                 
                 title = title_tag.get_text(strip=True) if title_tag else "Sin título"
                 
-                # Extract Date
                 date_tag = container.find('span', class_='date') or container.find('time')
-                # If not found, try to find a date pattern in the text
                 date = date_tag.get_text(strip=True) if date_tag else ""
                 
-                # Extract PDF URL
                 pdf_url = btn.get('href')
                 
                 if title and pdf_url:
                     publications.append({
-                        "titulo": title,
-                        "fecha": date,
-                        "url_origen": pdf_url,
-                        "categoria": "Científica"
+                        "title": title, # Renamed from titulo
+                        "year": date,   # Renamed from fecha
+                        "url": pdf_url, # Renamed from url_origen
+                        "category": "Científica" # Renamed from categoria
                     })
             except Exception as e:
                 print(f"Error parsing publication item: {e}")
                 continue
                 
-        # If the above specific strategy fails, let's try a more generic one based on the screenshot
+        # Generic strategy fallback
         if not publications:
             print("Specific strategy failed, trying generic iteration...")
-            # The screenshot shows items with a date, title, and buttons.
-            # Let's iterate over all 'article' tags or divs with specific classes if we knew them.
-            # Since we don't know the class, let's look for the visual structure.
-            
-            # Find all elements that look like titles (e.g., h3)
-            # and check if they have a download link nearby.
             potential_titles = soup.find_all(['h3', 'h4'])
             for t in potential_titles:
                 link = t.find_next('a', href=True)
-                # Check if this link or the next one is a download link
-                # In the screenshot, "Descargar" is a button.
-                
-                # Look for "Descargar" in the next few elements
                 next_elems = t.find_all_next('a', limit=5)
                 pdf_url = None
                 for a in next_elems:
@@ -152,16 +118,14 @@ def scrape_cecan_publications():
                         break
                 
                 if pdf_url:
-                    # Found a match
-                    # Date is usually before the title
                     prev = t.find_previous(text=True).strip()
-                    date = prev if len(prev) < 20 else "" # Simple heuristic
+                    date = prev if len(prev) < 20 else ""
                     
                     publications.append({
-                        "titulo": t.get_text(strip=True),
-                        "fecha": date,
-                        "url_origen": pdf_url,
-                        "categoria": "Científica"
+                        "title": t.get_text(strip=True), # Renamed from titulo
+                        "year": date, # Renamed from fecha
+                        "url": pdf_url, # Renamed from url_origen
+                        "category": "Científica" # Renamed from categoria
                     })
 
         print(f"Found {len(publications)} publications.")
@@ -174,7 +138,6 @@ def scrape_cecan_publications():
 def scrape_uc_staff():
     """
     Scrapes the UC Medicine research directory for staff information.
-    Returns a dictionary keyed by normalized name with data: {cargo, url_foto}
     """
     print("Scraping UC Medicine staff...")
     url = "https://medicina.uc.cl/investigacion/direccion-de-investigacion/investigadores/"
@@ -196,35 +159,14 @@ def scrape_uc_staff():
             
             if not name or len(name) < 5:
                 continue
-                
             if 'logo' in src.lower() or 'icon' in src.lower():
                 continue
-                
             if not (name.startswith('Dr') or name.startswith('Prof') or name.startswith('Marcela') or ' ' in name):
                  continue
 
-            parent = img.find_parent('a')
-            container = parent.parent if parent else img.parent
-            
-            text = container.get_text(separator='\n').strip()
-            lines = [l.strip() for l in text.split('\n') if l.strip()]
-            
-            cargo = "Investigador"
-            possible_titles = []
-            
-            for line in lines:
-                if line.lower() == name.lower():
-                    continue
-                if len(line) > 3 and line != name:
-                    possible_titles.append(line)
-            
-            if possible_titles:
-                cargo = ", ".join(possible_titles[:2]) 
-                
             norm_name = normalize_name(name)
             if norm_name:
                 staff_data[norm_name] = {
-                    "cargo_oficial": cargo,
                     "url_foto": src
                 }
                 
@@ -243,39 +185,28 @@ def sync_staff_data():
     
     uc_data = scrape_uc_staff()
     
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT id, full_name FROM academic_members WHERE member_type='researcher'")
-    investigators = cursor.fetchall()
-    
-    for inv_id, name in investigators:
-        print(f"Processing {name}...")
+    db = SessionLocal()
+    try:
+        investigators = db.query(AcademicMember).filter(AcademicMember.member_type == 'researcher').all()
         
-        # Update UC Data if available
-        norm_name = normalize_name(name)
-        if norm_name and norm_name in uc_data:
-            data = uc_data[norm_name]
+        for inv in investigators:
+            print(f"Processing {inv.full_name}...")
             
-            # Check if details exist
-            cursor.execute("SELECT id FROM researcher_details WHERE member_id = ?", (inv_id,))
-            details_exists = cursor.fetchone()
-            
-            if details_exists:
-                cursor.execute("""
-                    UPDATE researcher_details 
-                    SET url_foto = ?
-                    WHERE member_id = ?
-                """, (data['url_foto'], inv_id))
-            else:
-                cursor.execute("""
-                    INSERT INTO researcher_details (member_id, url_foto)
-                    VALUES (?, ?)
-                """, (inv_id, data['url_foto']))
-            
-            conn.commit()
-            
-    conn.close()
+            norm_name = normalize_name(inv.full_name)
+            if norm_name and norm_name in uc_data:
+                data = uc_data[norm_name]
+                
+                # Check or create details
+                if not inv.researcher_details:
+                    inv.researcher_details = ResearcherDetails(member_id=inv.id)
+                
+                inv.researcher_details.url_foto = data['url_foto']
+                db.add(inv) # Mark as modified
+                
+        db.commit()
+    finally:
+        db.close()
+        
     print("Staff synchronization complete.")
 
 def sync_publications_data():
@@ -286,52 +217,49 @@ def sync_publications_data():
     
     pubs = scrape_cecan_publications()
     
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    for pub in pubs:
-        print(f"Processing publication: {pub['titulo']}")
-        
-        # Check if exists
-        cursor.execute("SELECT id FROM publicaciones WHERE titulo = ?", (pub['titulo'],))
-        exists = cursor.fetchone()
-        
-        if exists:
-            print("Skipping existing publication.")
-            continue
+    db = SessionLocal()
+    try:
+        for pub in pubs:
+            print(f"Processing publication: {pub['title']}")
             
-        # Download PDF
-        filename = f"{int(time.time())}_{random.randint(1000,9999)}.pdf"
-        pdf_path = download_pdf(pub['url_origen'], filename)
-        
-        content_text = ""
-        local_path = ""
-        
-        if pdf_path:
-            local_path = pdf_path
-            print("Extracting text...")
-            content_text = extract_text_from_pdf(pdf_path)
+            # Check by title
+            exists = db.query(Publication).filter(Publication.title == pub['title']).first()
+            if exists:
+                print("Skipping existing publication.")
+                continue
+                
+            # Download PDF
+            filename = f"{int(time.time())}_{random.randint(1000,9999)}.pdf"
+            pdf_path = download_pdf(pub['url'], filename)
             
-        cursor.execute("""
-            INSERT INTO publicaciones (
-                titulo, fecha, url_origen, path_pdf_local, contenido_texto, categoria,
-                has_valid_affiliation, has_funding_ack, anid_report_status
+            content_text = ""
+            local_path = ""
+            
+            if pdf_path:
+                local_path = pdf_path
+                print("Extracting text...")
+                content_text = extract_text_from_pdf(pdf_path)
+                
+            new_pub = Publication(
+                title=pub['title'], 
+                year=pub['year'], 
+                url=pub['url'], 
+                local_path=local_path, 
+                content=content_text,
+                category=pub['category'],
+                has_valid_affiliation=False,
+                has_funding_ack=False,
+                anid_report_status='Pending'
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            pub['titulo'], 
-            pub['fecha'], 
-            pub['url_origen'], 
-            local_path, 
-            content_text,
-            pub['categoria'],
-            False,  # has_valid_affiliation - will be audited later
-            False,  # has_funding_ack - will be audited later
-            'Error'  # anid_report_status - default value
-        ))
-        conn.commit()
-        
-    conn.close()
+            db.add(new_pub)
+            db.commit()
+            
+    except Exception as e:
+        db.rollback()
+        print(f"Error syncing publications: {e}")
+    finally:
+        db.close()
+
     print("Publications synchronization complete.")
 
 def _is_rate_limit_error(exception):
@@ -350,7 +278,6 @@ def _is_rate_limit_error(exception):
 def get_openalex_metrics(orcid: Optional[str] = None, doi: Optional[str] = None) -> Dict[str, Any]:
     """
     Fetch metrics from OpenAlex API.
-    Supports ORCID for authors and DOI for publications.
     """
     base_url = "https://api.openalex.org"
     params = {"mailto": "admin@cecan.cl"} # OpenAlex polite pool

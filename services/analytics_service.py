@@ -81,14 +81,14 @@ class AnalyticsService:
         results = (
             db.query(
                 WorkPackage.id.label("wp_id"),
-                WorkPackage.nombre.label("wp_name"),
+                WorkPackage.name.label("wp_name"), # Renamed from nombre
                 Node.id.label("node_id"),
-                Node.nombre.label("node_name")
+                Node.name.label("node_name") # Renamed from nombre
             )
             .select_from(Project)
             .join(WorkPackage, Project.wp_id == WorkPackage.id)
-            .join(ProjectNode, Project.id == ProjectNode.proyecto_id)
-            .join(Node, ProjectNode.nodo_id == Node.id)
+            .join(ProjectNode, Project.id == ProjectNode.project_id) # Renamed from proyecto_id
+            .join(Node, ProjectNode.node_id == Node.id) # Renamed from nodo_id
             .all()
         )
         
@@ -110,10 +110,6 @@ class AnalyticsService:
 
         # 2. WP -> WP Collaboration (ProjectOtherWP)
         # Assuming ProjectOtherWP connects a Project (which has a WP) to another WP (OtherWP)
-        # SQL: SELECT w1.name, w2.name, count(*) 
-        #      FROM projects p JOIN wps w1 ON p.wp_id=w1.id 
-        #      JOIN project_other_wp pow ON p.id=pow.project_id 
-        #      JOIN wps w2 ON pow.wp_id=w2.id
         
         # Aliased WPs for join
         WP1 = aliased(WorkPackage)
@@ -122,17 +118,17 @@ class AnalyticsService:
         collab_results = (
             db.query(
                 WP1.id.label("source_id"),
-                WP1.nombre.label("source_name"),
+                WP1.name.label("source_name"), # Renamed
                 WP2.id.label("target_id"), 
-                WP2.nombre.label("target_name"),
+                WP2.name.label("target_name"), # Renamed
                 func.count(Project.id).label("count")
             )
             .select_from(Project)
             .join(WP1, Project.wp_id == WP1.id)
-            .join(ProjectOtherWP, Project.id == ProjectOtherWP.proyecto_id)
+            .join(ProjectOtherWP, Project.id == ProjectOtherWP.project_id) # Renamed from proyecto_id
             .join(WP2, ProjectOtherWP.wp_id == WP2.id)
             .filter(Project.wp_id != ProjectOtherWP.wp_id) # Avoid self-loops if any
-            .group_by(WP1.id, WP2.id)
+            .group_by(WP1.id, WP2.id, WP1.name, WP2.name) # Added name to group by
             .all()
         )
         
@@ -189,10 +185,11 @@ class AnalyticsService:
 
         # 3. Connectivity/Centrality (20%)
         # Count of unique WPs and Nodes touched via projects
-        nodes_touched = db.query(func.count(func.distinct(ProjectNode.nodo_id))).join(
-            Project, Project.id == ProjectNode.proyecto_id
+        # Updated joins to use new English FKs (project_id, node_id)
+        nodes_touched = db.query(func.count(func.distinct(ProjectNode.node_id))).join(
+            Project, Project.id == ProjectNode.project_id
         ).join(
-            ProjectResearcher, Project.id == ProjectResearcher.proyecto_id
+            ProjectResearcher, Project.id == ProjectResearcher.project_id
         ).filter(ProjectResearcher.member_id == member_id).scalar() or 0
         
         # Threshold: 4 nodes = max points

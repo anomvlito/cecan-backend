@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Optional
+from datetime import datetime
 from sqlalchemy.orm import Session, joinedload
 
 from database.session import get_db
@@ -35,6 +36,18 @@ class PublicPublicationOut(BaseModel):
     doi_verification_status: Optional[str] = None # pending, valid_openalex, valid_http, broken, repaired
     has_funding_ack: bool = False
     anid_report_status: str = "Pending"
+    # OpenAlex metrics
+    metrics_data: Optional[dict] = None
+    metrics_last_updated: Optional[datetime] = None
+    # AI-generated summaries  
+    summary_es: Optional[str] = None
+    summary_en: Optional[str] = None
+    ai_journal_analysis: Optional[dict] = None  # Added: AI Journal Analysis
+    quartile: Optional[str] = None  # Added: Dedicated Quartile Column
+    content: Optional[str] = None
+    content: Optional[str] = None
+    # Legacy impact metrics
+    impact_metrics: Optional[dict] = None
     authors: List[ResearcherSummarySchema] = []
 
 
@@ -70,9 +83,9 @@ async def get_public_researchers(db: Session = Depends(get_db)):
                     pub = rp.publication
                     pubs.append({
                         "id": pub.id,
-                        "title": pub.titulo,
-                        "year": pub.fecha,
-                        "url": pub.url_origen,
+                        "title": pub.title,
+                        "year": pub.year,
+                        "url": pub.url,
                         "doi": pub.canonical_doi, # Map to standardized field
                         "canonical_doi": pub.canonical_doi, # Map to field expected by table
                         "has_funding_ack": pub.has_funding_ack,
@@ -84,7 +97,7 @@ async def get_public_researchers(db: Session = Depends(get_db)):
                 "full_name": member.full_name,
                 "photo_url": details.url_foto if details else None,
                 "category": details.category if details else None,
-                "wp_name": wp.nombre if wp else None,
+                "wp_name": wp.name if wp else None,
                 "metrics": {
                     "h_index": details.indice_h if details else None,
                     "total_citations": details.citaciones_totales if details else None
@@ -140,14 +153,31 @@ async def get_public_publications(db: Session = Depends(get_db)):
             # 2. Use getattr to avoid crash if DB is missing new columns
             results.append({
                 "id": pub.id,
-                "title": pub.titulo,
-                "year": pub.fecha,
-                "url": pub.url_origen,
+                "title": pub.title,
+                "year": pub.year,
+                "url": pub.url,
                 "doi": getattr(pub, "canonical_doi", None), 
                 "canonical_doi": getattr(pub, "canonical_doi", None),
                 "doi_verification_status": getattr(pub, "doi_verification_status", "pending"),
                 "has_funding_ack": getattr(pub, "has_funding_ack", False),
                 "anid_report_status": getattr(pub, "anid_report_status", "Pending"),
+                # OpenAlex metrics
+                "metrics_data": getattr(pub, "metrics_data", None),
+                "metrics_last_updated": getattr(pub, "metrics_last_updated", None),
+                # AI-generated summaries
+                "summary_es": getattr(pub, "summary_es", None),
+                "summary_en": getattr(pub, "summary_en", None),
+                "ai_journal_analysis": getattr(pub, "ai_journal_analysis", None), # Added: AI Journal Analysis
+                "quartile": getattr(pub, "quartile", None), # Added: Dedicated Quartile
+                "content": getattr(pub, "content", None),
+                "content": getattr(pub, "content", None),
+                # Legacy impact metrics
+                "impact_metrics": {
+                    "citation_count": pub.impact_metrics.citation_count if pub.impact_metrics else None,
+                    "is_international_collab": pub.impact_metrics.is_international_collab if pub.impact_metrics else None,
+                    "quartile": pub.impact_metrics.quartile if pub.impact_metrics else None,
+                    "jif": pub.impact_metrics.jif if pub.impact_metrics else None,
+                } if pub.impact_metrics else None,
                 "authors": authors
             })
             

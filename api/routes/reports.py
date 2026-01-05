@@ -8,7 +8,8 @@ from datetime import datetime
 
 from database.session import get_db
 from core.models import WorkPackage, Project, AcademicMember, Publication, ComplianceStatus
-from api.routes.auth import require_editor, User, get_current_user
+from core.security import require_editor, get_current_user
+from core.models import User
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
 

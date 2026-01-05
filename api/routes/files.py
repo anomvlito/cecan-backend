@@ -3,7 +3,8 @@ from fastapi.responses import FileResponse
 import os
 import shutil
 from datetime import datetime
-from api.routes.auth import require_editor, User
+from core.security import require_editor
+from core.models import User
 
 router = APIRouter(prefix="/files", tags=["Files"])
 

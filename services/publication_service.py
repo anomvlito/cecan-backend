@@ -6,7 +6,7 @@ Business logic for publication management and PDF processing
 import io
 import os
 import re
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict
 import PyPDF2
 import pdfplumber
 from sqlalchemy.orm import Session
@@ -128,28 +128,40 @@ def extract_doi(text: str) -> Optional[str]:
     Returns:
         DOI URL (with https://doi.org/ prefix) or None if not found
     """
-    # DOI regex pattern (case-insensitive)
-    # Matches standard DOI format: 10.xxxx/...
-    # Removed \b boundary check to catch cases like "DOI10.1038/..."
-    # Pattern looks for "10.", 4-9 digits, "/", then valid DOI chars
-    doi_pattern = r'(10\.\d{4,9}/[-._;()/:a-zA-Z0-9]+)'
+    # Normalize text: replace newlines and multiple spaces with single space
+    # This helps with PDFs where DOI might be split across lines
+    normalized_text = ' '.join(text.split())
     
-    # Search in full text (removed limit to find DOIs in references/end)
-    search_text = text
+    # Multiple DOI patterns to try (ordered by specificity)
+    patterns = [
+        # Pattern 1: Explicit "DOI:" prefix (most reliable)
+        r'DOI\s*:?\s*(10\.\d{4,9}/[-._;()/:a-zA-Z0-9]+)',
+        
+        # Pattern 2: Standard DOI pattern with word boundary
+        r'\b(10\.\d{4,9}/[-._;()/:a-zA-Z0-9]+)',
+        
+        # Pattern 3: DOI in URL format
+        r'(?:https?://)?(?:dx\.)?doi\.org/(10\.\d{4,9}/[-._;()/:a-zA-Z0-9]+)',
+    ]
     
-    match = re.search(doi_pattern, search_text, re.IGNORECASE)
-    if match:
-        doi = match.group(1)
-        # Clean up any trailing punctuation that might have been captured
-        doi = doi.rstrip('.,;)]')
-        return f"https://doi.org/{doi}"
+    for pattern in patterns:
+        match = re.search(pattern, normalized_text, re.IGNORECASE)
+        if match:
+            # Extract the DOI part (group 1)
+            doi = match.group(1)
+            # Clean up any trailing punctuation that might have been captured
+            doi = doi.rstrip('.,;)]')
+            print(f"   [DOI Extraction] Found DOI: {doi}")
+            return f"https://doi.org/{doi}"
     
+    print("   [DOI Extraction] No DOI found in text")
     return None
 
 
 def match_authors_from_text(text: str, db: Session) -> List[int]:
     """
     Match authors from PDF text against researchers in database.
+    Searches by ORCID first, then by name variations.
     
     Args:
         text: Full text content from PDF
@@ -169,13 +181,29 @@ def match_authors_from_text(text: str, db: Session) -> List[int]:
     matched_ids = []
     text_lower = text.lower()
     
+    # ORCID regex pattern (matches XXXX-XXXX-XXXX-XXXX format)
+    import re
+    orcid_pattern = re.compile(r'\b(\d{4}-\d{4}-\d{4}-\d{3}[0-9X])\b', re.IGNORECASE)
+    found_orcids = set(orcid_pattern.findall(text))
+    
     for researcher in researchers:
-        # Check full name
+        # Priority 1: Check ORCID match
+        if researcher.researcher_details and researcher.researcher_details.orcid:
+            orcid = researcher.researcher_details.orcid
+            # Clean ORCID (extract just the ID if it's a URL)
+            clean_orcid = orcid.split('/')[-1].strip() if '/' in orcid else orcid.strip()
+            if clean_orcid in found_orcids:
+                matched_ids.append(researcher.id)
+                print(f"   [Author Match] ✅ ORCID: {clean_orcid} → {researcher.full_name}")
+                continue
+        
+        # Priority 2: Check full name
         if researcher.full_name and researcher.full_name.lower() in text_lower:
             matched_ids.append(researcher.id)
+            print(f"   [Author Match] ✅ Name: {researcher.full_name}")
             continue
         
-        # Check researcher details if available
+        # Priority 3: Check researcher details variations
         if researcher.researcher_details:
             details = researcher.researcher_details
             
@@ -184,6 +212,7 @@ def match_authors_from_text(text: str, db: Session) -> List[int]:
                 full_name_variant = f"{details.first_name} {details.last_name}".lower()
                 if full_name_variant in text_lower:
                     matched_ids.append(researcher.id)
+                    print(f"   [Author Match] ✅ Name variant: {full_name_variant}")
                     continue
             
             # Check name variations (pipe-separated)
@@ -192,80 +221,96 @@ def match_authors_from_text(text: str, db: Session) -> List[int]:
                 for variation in variations:
                     if variation.strip().lower() in text_lower:
                         matched_ids.append(researcher.id)
+                        print(f"   [Author Match] ✅ Variation: {variation.strip()}")
                         break
     
     return list(set(matched_ids))  # Remove duplicates
 
 
-def generate_summary_with_llm(text: str, api_key: Optional[str] = None) -> Tuple[str, str]:
+def analyze_text_with_ai(text: str, api_key: Optional[str] = None) -> Dict:
     """
-    Generate Spanish and English summaries using Google Gemini LLM.
-    
-    Args:
-        text: Full text content from PDF
-        api_key: Google API key (optional, will use env var if not provided)
-        
-    Returns:
-        Tuple of (resumen_es, resumen_en)
+    Analyze text with AI to generate summaries and extract journal metadata.
+    Returns a dictionary with summaries and journal analysis.
     """
     try:
         import google.generativeai as genai
+        import json
         
         # Get API key
         if not api_key:
             api_key = os.environ.get("GOOGLE_API_KEY")
         
         if not api_key:
-            print("Warning: GOOGLE_API_KEY not found. Using placeholder summaries.")
-            return _generate_placeholder_summaries()
+            print("!!! [AI DEBUG] Warning: GOOGLE_API_KEY not found in environment")
+            return {
+                "summary_es": "Error: API Key no encontrada",
+                "summary_en": "Error: API Key not found",
+                "journal_analysis": None
+            }
+        
+        print(f"!!! [AI DEBUG] Starting analysis with model {os.environ.get('GEMINI_MODEL_NAME', 'default')}...")
         
         # Configure Gemini
         genai.configure(api_key=api_key)
         model_name = os.environ.get("GEMINI_MODEL_NAME", "gemini-2.0-flash-exp")
         model = genai.GenerativeModel(model_name)
         
-        # Prepare prompt (use first 3000 chars to avoid token limits)
-        text_sample = text[:3000]
-        prompt = f"""Resume este artículo científico en 150 palabras o menos.
+        # Prepare prompt (use first 15000 chars)
+        text_sample = text[:15000]
+        prompt = f"""Analiza este texto de una publicación científica.
 
-Proporciona DOS resúmenes del mismo contenido:
-1. Primero en ESPAÑOL
-2. Luego en INGLÉS
+TAREAS:
+1. Generar resumen en ESPAÑOL (max 150 palabras)
+2. Generar resumen en INGLÉS (max 150 words)
+3. Detectar nombre de la revista científica (Journal Name)
+4. Estimar cuartil (Q1-Q4) basado en tu conocimiento del journal. Si no sabes, usa "Unknown".
+5. Estimar H-Index aproximado de la revista (número entero).
+6. Generar enlace de búsqueda exacto para SCImago Journal Rank.
 
-Formato de respuesta:
-[ES] <resumen en español>
-[EN] <summary in English>
+FORMATO DE RESPUESTA (JSON PURO):
+{{
+  "summary_es": "...",
+  "summary_en": "...",
+  "journal_analysis": {{
+    "journal_name": "Nombre de la Revista",
+    "quartile_estimate": "Q1",
+    "h_index_estimate": 150,
+    "scimago_search_url": "https://www.scimagojr.com/journalsearch.php?q=...",
+    "reasoning": "Breve explicación de por qué clasificaste así..."
+  }}
+}}
 
-Texto del artículo:
+TEXTO:
 {text_sample}"""
-        
-        # Generate summary (with retry logic)
+
         response = call_gemini_generate_with_retry(model, prompt)
         result_text = response.text
         
-        # Parse response
-        resumen_es = ""
-        resumen_en = ""
-        
-        # Extract Spanish summary
-        es_match = re.search(r'\[ES\]\s*(.+?)(?=\[EN\]|$)', result_text, re.DOTALL | re.IGNORECASE)
-        if es_match:
-            resumen_es = es_match.group(1).strip()
-        
-        # Extract English summary
-        en_match = re.search(r'\[EN\]\s*(.+?)$', result_text, re.DOTALL | re.IGNORECASE)
-        if en_match:
-            resumen_en = en_match.group(1).strip()
-        
-        # Fallback if parsing failed
-        if not resumen_es or not resumen_en:
-            return _generate_placeholder_summaries()
-        
-        return resumen_es, resumen_en
-        
+        # Clean markdown formatting if present
+        if "```json" in result_text:
+            result_text = result_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in result_text:
+            result_text = result_text.split("```")[0].strip()
+            
+        try:
+            return json.loads(result_text)
+        except json.JSONDecodeError:
+            print(f"Error parsing AI JSON output: {result_text[:100]}...")
+            return {
+                "summary_es": "Error generando resumen (Formato inválido)",
+                "summary_en": "Error generating summary (Invalid format)",
+                "journal_analysis": None
+            }
+            
     except Exception as e:
-        print(f"Error generating summary with LLM: {e}")
-        return _generate_placeholder_summaries()
+        print(f"!!! [AI DEBUG] Critical Error in analyze_text_with_ai: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "summary_es": f"Error: {str(e)}",
+            "summary_en": f"Error: {str(e)}",
+            "journal_analysis": None
+        }
 
 
 def _generate_placeholder_summaries() -> Tuple[str, str]:
@@ -275,7 +320,7 @@ def _generate_placeholder_summaries() -> Tuple[str, str]:
     return resumen_es, resumen_en
 
 
-def enrich_publication_data(file_bytes: bytes, filename: str, db: Session) -> dict:
+def enrich_publication_data(file_bytes: bytes, filename: str, db: Session, skip_ai: bool = False) -> dict:
     """
     Orchestrator function that extracts and enriches all data from a PDF.
     
@@ -283,6 +328,7 @@ def enrich_publication_data(file_bytes: bytes, filename: str, db: Session) -> di
         file_bytes: PDF file as bytes
         filename: Original filename
         db: Database session
+        skip_ai: If True, skips LLM summary generation (Fast Path)
         
     Returns:
         Dictionary with enriched publication data
@@ -294,7 +340,8 @@ def enrich_publication_data(file_bytes: bytes, filename: str, db: Session) -> di
     result = {
         "filename": filename,
         "text": text,
-        "doi_url": None,
+        "doi": None,  # Clean DOI string
+        "doi_url": None,  # Full https://doi.org/... URL
         "matched_author_ids": [],
         "resumen_es": "",
         "resumen_en": "",
@@ -306,9 +353,24 @@ def enrich_publication_data(file_bytes: bytes, filename: str, db: Session) -> di
         doi_url = extract_doi(text)
         if doi_url:
             result["doi_url"] = doi_url
+            # Extract clean DOI (e.g., "10.1234/abc" from "https://doi.org/10.1234/abc")
+            clean_doi = doi_url.split("doi.org/")[-1] if "doi.org/" in doi_url else doi_url.replace("https://doi.org/", "")
+            result["doi"] = clean_doi
             result["processing_notes"].append(f"DOI detectado: {doi_url}")
         else:
+            result["doi"] = None
             result["processing_notes"].append("No se encontró DOI en el documento")
+    
+    # Extract ORCIDs
+    extracted_orcids = []
+    if text:
+        import re
+        orcid_pattern = re.compile(r'\b(\d{4}-\d{4}-\d{4}-\d{3}[0-9X])\b', re.IGNORECASE)
+        found_orcids = set(orcid_pattern.findall(text))
+        if found_orcids:
+            extracted_orcids = list(found_orcids)
+            result["extracted_orcids"] = ",".join(extracted_orcids)
+            result["processing_notes"].append(f"{len(extracted_orcids)} ORCID(s) detectado(s): {', '.join(extracted_orcids)}")
     
     # Match authors
     if text:
@@ -319,14 +381,74 @@ def enrich_publication_data(file_bytes: bytes, filename: str, db: Session) -> di
         else:
             result["processing_notes"].append("No se detectaron autores conocidos")
     
-    # Generate summaries
-    if text and len(text) > 100:  # Only if there's meaningful content
-        resumen_es, resumen_en = generate_summary_with_llm(text)
-        result["resumen_es"] = resumen_es
-        result["resumen_en"] = resumen_en
-        result["processing_notes"].append("Resúmenes generados exitosamente")
+    # Generate summaries and analysis
+    if not skip_ai and text and len(text) > 100:  # Only if there's meaningful content
+        analysis = analyze_text_with_ai(text)
+        result["resumen_es"] = analysis.get("summary_es")
+        result["resumen_en"] = analysis.get("summary_en")
+        result["ai_journal_analysis"] = analysis.get("journal_analysis")
+        result["processing_notes"].append("Análisis IA completado (Resumen + Journal)")
     else:
-        result["resumen_es"], result["resumen_en"] = _generate_placeholder_summaries()
-        result["processing_notes"].append("Texto insuficiente para generar resumen")
+        placeholders = _generate_placeholder_summaries()
+        result["resumen_es"] = placeholders[0]
+        result["resumen_en"] = placeholders[1]
+        result["ai_journal_analysis"] = None
+        
+        if skip_ai:
+            result["processing_notes"].append("Resumen IA omitido por usuario (Fast Path)")
+        else:
+            result["processing_notes"].append("Texto insuficiente para generar resumen")
     
     return result
+
+
+def generate_summary_from_text(text: str) -> Tuple[str, str]:
+    """
+    Generate Spanish and English summaries from text using Gemini.
+    """
+    import os
+    import re
+    import google.generativeai as genai
+    
+    api_key = os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        raise Exception("Google API Key not found")
+        
+    genai.configure(api_key=api_key)
+    model_name = os.environ.get("GEMINI_MODEL_NAME", "gemini-2.0-flash-exp")
+    model = genai.GenerativeModel(model_name)
+    
+    # Use reasonable sample size
+    text_sample = text[:8000]
+    
+    prompt = f"""Resume este artículo científico en 150 palabras o menos.
+
+Proporciona DOS resúmenes del mismo contenido:
+1. Primero en ESPAÑOL
+2. Luego en INGLÉS
+
+Formato de respuesta:
+[ES] <resumen en español>
+[EN] <summary in English>
+
+Texto del artículo:
+{text_sample}"""
+
+    response = call_gemini_generate_with_retry(model, prompt)
+    result_text = response.text
+    
+    resumen_es = ""
+    resumen_en = ""
+        
+    es_match = re.search(r'\[ES\]\s*(.+?)(?=\[EN\]|$)', result_text, re.DOTALL | re.IGNORECASE)
+    if es_match:
+        resumen_es = es_match.group(1).strip()
+    
+    en_match = re.search(r'\[EN\]\s*(.+?)$', result_text, re.DOTALL | re.IGNORECASE)
+    if en_match:
+         resumen_en = en_match.group(1).strip()
+         
+    if not resumen_es and not resumen_en:
+         resumen_es = result_text
+         
+    return resumen_es, resumen_en

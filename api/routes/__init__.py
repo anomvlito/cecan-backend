@@ -12,7 +12,8 @@ from . import (
     reports,
     public,
     catalogs,
-    external
+    external,
+    students
 )
 
 __all__ = [
@@ -27,5 +28,6 @@ __all__ = [
     'reports',
     'public',
     'catalogs',
-    'external'
+    'external',
+    'students'
 ]

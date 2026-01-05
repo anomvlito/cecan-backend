@@ -298,6 +298,43 @@ def get_publication_by_doi(doi: str) -> Dict:
         )
 
 
+
+def fetch_journal_metrics(source_id: str) -> Dict:
+    """
+    Fetch comprehensive metrics for a journal/source from OpenAlex.
+    
+    Args:
+        source_id: OpenAlex Source ID (e.g., "S123456789" or full URL)
+        
+    Returns:
+        Dictionary with journal metrics (h_index, impact_factor, etc.)
+    """
+    # Clean ID
+    clean_id = source_id.split('/')[-1]
+    url = f"https://api.openalex.org/sources/{clean_id}"
+    
+    headers = {
+        "User-Agent": f"mailto:{OPENALEX_CONTACT_EMAIL}"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            summary = data.get("summary_stats", {})
+            return {
+                "h_index": summary.get("h_index", 0),
+                "i10_index": summary.get("i10_index", 0),
+                "works_count": data.get("works_count", 0),
+                "cited_by_count": data.get("cited_by_count", 0),
+                "2yr_mean_citedness": summary.get("2yr_mean_citedness", 0)
+            }
+        return {}
+    except Exception as e:
+        print(f"   [OpenAlex] ⚠️ Error fetching journal metrics: {e}")
+        return {}
+
+
 def detect_international_collab(openalex_data: Dict) -> bool:
     """
     Detect if publication has international collaboration.
@@ -348,6 +385,8 @@ def extract_journal_info(openalex_data: Dict) -> Dict[str, any]:
     return {
         "journal_name": source.get("display_name"),
         "issn": source.get("issn_l"),
+        "source_id": source.get("id"),  # Added ID for fetching metrics
+
         "journal_type": source.get("type"),
         "is_oa": primary_location.get("is_oa", False) if primary_location else False,
         "oa_status": openalex_data.get("open_access", {}).get("oa_status")
@@ -382,12 +421,22 @@ def extract_publication_metadata(data: Dict) -> Dict:
         data: Raw dictionary from OpenAlex API
         
     Returns:
-        Dictionary with structured metrics for DB storage
+        Dictionary with structured metrics for DB storage, or None if data is invalid
     """
-    primary_location = data.get("primary_location", {}) or {}
-    source = primary_location.get("source", {}) or {}
+    if not data:
+        print("   [OpenAlex] ❌ extract_publication_metadata received None data")
+        return None
     
-    return {
+    # Debug: Log what we received
+    print(f"   [OpenAlex] Extracting metadata from response with keys: {list(data.keys())[:10]}")
+        
+    primary_location = data.get("primary_location") or {}
+    source = primary_location.get("source") or {}
+    open_access = data.get("open_access") or {}
+    primary_topic = data.get("primary_topic") or {}
+    
+    result = {
+        "title": data.get("title"),  # Added title extraction
         "cited_by_count": data.get("cited_by_count", 0),
         "publication_year": data.get("publication_year"),
         "journal_name": source.get("display_name"),
@@ -395,6 +444,23 @@ def extract_publication_metadata(data: Dict) -> Dict:
         "language": data.get("language"),
         "openalex_id": data.get("id"),
         "is_oa": primary_location.get("is_oa", False),
-        "oa_status": data.get("open_access", {}).get("oa_status"),
-        "topic": data.get("primary_topic", {}).get("display_name")
+        "oa_status": open_access.get("oa_status"),
+        "topic": primary_topic.get("display_name"),
+        "journal_metrics": None
     }
+    
+    # Fetch Journal H-Index if Source ID is present
+    source_id = source.get("id")
+    if source_id:
+        print(f"   [OpenAlex] Fetching metrics for source: {source_id}")
+        j_metrics = fetch_journal_metrics(source_id)
+        if j_metrics:
+            result["journal_metrics"] = j_metrics
+            # Also flatten h_index for easier access if needed
+            print(f"   [OpenAlex] ✅ Journal H-Index: {j_metrics.get('h_index')}")
+
+    
+    # Debug: Log what we extracted
+    print(f"   [OpenAlex] Extracted - Title: {result['title'][:50] if result['title'] else 'None'}, Year: {result['publication_year']}, Journal: {result['journal_name']}")
+    
+    return result

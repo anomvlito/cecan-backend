@@ -4,7 +4,8 @@ from sqlalchemy import func
 import threading
 from typing import List
 
-from api.routes.auth import require_editor, get_current_user, User
+from core.security import require_editor, get_current_user
+from core.models import User
 from database.session import get_db
 from core.models import AcademicMember, ResearcherDetails, ProjectResearcher, ResearcherPublication
 from services import scraper_service, matching_service

@@ -47,7 +47,7 @@ class StudentDetailsBase(BaseModel):
 class AcademicMemberBase(BaseModel):
     rut: Optional[str] = None
     full_name: str
-    email: Optional[EmailStr] = None
+    email: Optional[str] = None # Relaxed from EmailStr to handle legacy dirty data
     institution: Optional[str] = None
     member_type: MemberType
     wp_id: Optional[int] = None
@@ -62,7 +62,7 @@ class AcademicMemberCreate(AcademicMemberBase):
 class AcademicMemberUpdate(BaseModel):
     rut: Optional[str] = None
     full_name: Optional[str] = None
-    email: Optional[EmailStr] = None
+    email: Optional[str] = None
     institution: Optional[str] = None
     member_type: Optional[MemberType] = None
     wp_id: Optional[int] = None
@@ -85,7 +85,7 @@ class StudentDetailsOut(StudentDetailsBase):
 
 class WorkPackageSchema(BaseModel):
     id: int
-    nombre: str
+    name: str # Renamed from nombre
     class Config:
         from_attributes = True
 
@@ -144,14 +144,14 @@ class ResearchOpportunityOut(BaseModel):
 
 class PublicationOut(BaseModel):
     id: int
-    title: str = Field(..., serialization_alias="titulo")
-    year: Optional[str] = Field(None, serialization_alias="fecha")
-    url: Optional[str] = Field(None, serialization_alias="url_origen")
-    doi: Optional[str] = Field(None, serialization_alias="canonical_doi")
+    title: str
+    year: Optional[str] = None
+    url: Optional[str] = None
+    canonical_doi: Optional[str] = None # Matched model field name
     
     # New Fields
-    summary_es: Optional[str] = Field(None, serialization_alias="resumen_es")
-    summary_en: Optional[str] = Field(None, serialization_alias="resumen_en")
+    summary_es: Optional[str] = None
+    summary_en: Optional[str] = None
     
     metrics_data: Optional[Dict[str, Any]] = None
     
@@ -160,19 +160,94 @@ class PublicationOut(BaseModel):
         populate_by_name = True
 
 class PublicationUpdate(BaseModel):
-    title: Optional[str] = Field(None, alias="titulo")
-    year: Optional[str] = Field(None, alias="fecha")
-    url: Optional[str] = Field(None, alias="url_origen")
-    doi: Optional[str] = Field(None, alias="canonical_doi")
+    title: Optional[str] = None
+    year: Optional[str] = None
+    url: Optional[str] = None
+    canonical_doi: Optional[str] = None
     
-    # English fields direct access (optional, but good for internal use)
-    # Pydantic allows both by default if populate_by_name=True is set
-    
-    summary_es: Optional[str] = Field(None, alias="resumen_es")
-    summary_en: Optional[str] = Field(None, alias="resumen_en")
+    # English fields direct access
+    summary_es: Optional[str] = None
+    summary_en: Optional[str] = None
+    quartile: Optional[str] = None # Added for manual update
     author_ids: Optional[List[int]] = None
     
     class Config:
         from_attributes = True
         populate_by_name = True
+
+# ===========================
+# STUDENT MANAGEMENT SCHEMAS
+# ===========================
+
+class StudentProgramEnum(str, Enum):
+    MAGISTER = "Magister"
+    DOCTORADO = "Doctorado"
+    POSTDOC = "Postdoctorado"
+    OTHER = "Other"
+
+class StudentStatusEnum(str, Enum):
+    ACTIVE = "Activo"
+    GRADUATED = "Graduado"
+    WITHDRAWN = "Retirado"
+    SUSPENDED = "Suspendido"
+
+class ThesisStatusEnum(str, Enum):
+    PROPOSAL = "Propuesta"
+    DRAFT = "Borrador"
+    DEFENSE_PENDING = "Defensa Pendiente"
+    APPROVED = "Aprobada"
+
+class ThesisBase(BaseModel):
+    title: str
+    abstract: Optional[str] = None
+    status: ThesisStatusEnum = ThesisStatusEnum.PROPOSAL
+    defense_date: Optional[datetime] = None
+    file_url: Optional[str] = None
+
+class ThesisCreate(ThesisBase):
+    student_id: int
+
+class ThesisUpdate(ThesisBase):
+    title: Optional[str] = None
+    status: Optional[ThesisStatusEnum] = None
+
+class ThesisOut(ThesisBase):
+    id: int
+    created_at: Optional[datetime]
+    updated_at: Optional[datetime]
+    class Config:
+        from_attributes = True
+
+class StudentBase(BaseModel):
+    full_name: str
+    email: Optional[EmailStr] = None
+    rut: Optional[str] = None
+    program: StudentProgramEnum = StudentProgramEnum.OTHER
+    university: Optional[str] = None
+    start_date: Optional[datetime] = None
+    graduation_date: Optional[datetime] = None
+    status: StudentStatusEnum = StudentStatusEnum.ACTIVE
+    tutor_id: Optional[int] = None
+    co_tutor_id: Optional[int] = None
+
+class StudentCreate(StudentBase):
+    pass
+
+class StudentUpdate(StudentBase):
+    full_name: Optional[str] = None
+    program: Optional[StudentProgramEnum] = None
+    status: Optional[StudentStatusEnum] = None
+
+class StudentOut(StudentBase):
+    id: int
+    created_at: Optional[datetime]
+    updated_at: Optional[datetime]
+    theses: List[ThesisOut] = []
+    
+    # We might want to include Tutor names in the output (populated by service)
+    tutor_name: Optional[str] = None
+    
+    class Config:
+        from_attributes = True
+
 
