@@ -195,6 +195,48 @@ def sync_all_researchers(db: Session, force_refresh: bool = False) -> Dict:
 
 import re
 from tenacity import retry, stop_after_attempt, wait_exponential
+import urllib.parse
+
+
+def search_publication_by_title(title: str) -> Dict:
+    """
+    Search for a publication by title in OpenAlex.
+    Returns the first best match if confidence is reasonable.
+    """
+    if not title or len(title) < 10:
+        return None
+        
+    # Clean title for search
+    clean_title = urllib.parse.quote(title)
+    url = f"https://api.openalex.org/works?filter=title.search:{clean_title}&per_page=1"
+    
+    headers = {
+        "User-Agent": f"mailto:{OPENALEX_CONTACT_EMAIL}"
+    }
+    
+    try:
+        print(f"   [OpenAlex] Searching details for title: {title[:50]}...")
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            results = data.get("results", [])
+            
+            if results:
+                match = results[0]
+                # Basic validation: Check if titles are somewhat similar?
+                # OpenAlex search is usually good.
+                print(f"   [OpenAlex] ✅ Found match by title: {match.get('doi')}")
+                return {
+                    "doi": match.get("doi"), # URL format
+                    "openalex_id": match.get("id"),
+                    "title": match.get("title"),
+                    "publication_year": match.get("publication_year")
+                }
+    except Exception as e:
+        print(f"   [OpenAlex] ⚠️ Search failed: {e}")
+    
+    return None
 
 
 def extract_doi_from_url(url: str) -> str:
@@ -464,3 +506,50 @@ def extract_publication_metadata(data: Dict) -> Dict:
     print(f"   [OpenAlex] Extracted - Title: {result['title'][:50] if result['title'] else 'None'}, Year: {result['publication_year']}, Journal: {result['journal_name']}")
     
     return result
+
+
+def search_venue_by_name(name: str) -> Dict:
+    """
+    Search for a venue/journal by name in OpenAlex to get details (publisher, ISSN).
+    
+    Args:
+        name: Journal/Venue name
+        
+    Returns:
+        Dictionary with venue details or None
+    """
+    if not name or len(name) < 3:
+        return None
+        
+    clean_name = urllib.parse.quote(name)
+    url = f"https://api.openalex.org/sources?filter=display_name.search:{clean_name}&per_page=1"
+    
+    headers = {
+        "User-Agent": f"mailto:{OPENALEX_CONTACT_EMAIL}"
+    }
+    
+    try:
+        print(f"   [OpenAlex] Searching venue details for: {name}...")
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            results = data.get("results", [])
+            
+            if results:
+                match = results[0]
+                publisher = match.get("host_organization_name", "Unknown")
+                issn = match.get("issn_l")
+                print(f"   [OpenAlex] ✅ Found venue: {match.get('display_name')} (Publisher: {publisher})")
+                
+                return {
+                    "id": match.get("id"),
+                    "display_name": match.get("display_name"),
+                    "publisher": publisher,
+                    "issn": issn,
+                    "type": match.get("type")
+                }
+    except Exception as e:
+        print(f"   [OpenAlex] ⚠️ Venue search failed: {e}")
+    
+    return None

@@ -48,12 +48,20 @@ class AnalyticsService:
             AcademicMember.member_type == 'researcher'
         ).scalar()
         
+        # 5. Total active students
+        from core.models import Student, StudentStatus
+        total_students = db.query(func.count(Student.id)).filter(
+            Student.status == StudentStatus.ACTIVE
+        ).scalar() or 0
+        
         return {
             "total_publicaciones": total_pubs,
             "total_citas": int(local_citations + latest_external_citations),
             "indice_h_promedio": round(avg_hindex, 1),
-            "total_investigadores": total_investigators
+            "total_investigadores": total_investigators,
+            "total_estudiantes": total_students
         }
+
 
     def get_impact_flow_graph(self, db: Session) -> dict:
         """Returns Sankey diagram data for Impact Flow visualization (WP -> Nodes)."""

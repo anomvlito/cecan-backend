@@ -10,7 +10,11 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import APP_TITLE, APP_VERSION, APP_DESCRIPTION, CORS_ORIGINS
-from api.routes import auth, compliance, publications, researchers, rag, dashboard, members, files, reports, public, catalogs, external, students
+from api.routes import (
+    auth, compliance, publications, researchers, rag, dashboard, 
+    members, files, reports, public, catalogs, external, students,
+    enrichment  # ← NUEVO
+)
 
 # Create FastAPI application
 app = FastAPI(
@@ -32,6 +36,7 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api")
 app.include_router(compliance.router, prefix="/api")
 app.include_router(publications.router, prefix="/api")
+app.include_router(enrichment.router, prefix="/api")  # ← NUEVO (antes de /api para evitar conflictos)
 app.include_router(researchers.router, prefix="/api")
 app.include_router(rag.router, prefix="/api")
 app.include_router(dashboard.router, prefix="/api")

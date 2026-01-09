@@ -29,9 +29,21 @@ async def get_members(
     current_user: User = Depends(get_current_user)
 ):
     from sqlalchemy.orm import joinedload
-    query = db.query(AcademicMember).options(joinedload(AcademicMember.wps))
+    
+    query = db.query(AcademicMember).options(
+        joinedload(AcademicMember.wps),
+        joinedload(AcademicMember.researcher_details)
+    )
+    
     if type:
         query = query.filter(AcademicMember.member_type == type)
+        
+        # If requesting researchers, only show those with category (Principal/Asociado/Adjunto)
+        if type == MemberType.RESEARCHER:
+            query = query.join(ResearcherDetails).filter(
+                ResearcherDetails.category.in_(['Principal', 'Asociado', 'Adjunto'])
+            )
+    
     return query.offset(skip).limit(limit).all()
 
 @router.post("", response_model=AcademicMemberOut)

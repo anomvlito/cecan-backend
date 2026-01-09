@@ -93,3 +93,34 @@ uploads/*
 
 # Configuración de agente (workflows privados)
 .agent/
+
+
+
+# User explicit ignores
+data/Base Investigadores CECAN rev ccv- 20 nov 2025.xlsx
+alembic/versions/01ef700ffabc_add_journal_metrics.py
+api/routes/enrichment.py
+data/publications/30-_2024_Global_Assessment_of_Palliative_Care_Need-_Pedro_Pérez.pdf
+data/publications/31-2024_Beyon_tobacco_-_BMC_Cancer.pdf
+data/publications/8.3._British_Airways.pdf
+data/publications/8._Ritz_Carlton.pdf
+debug_gemini_version.py
+debug_grounding.py
+debug_pub.py
+debug_publisher.py
+debug_wos.html
+debug_wos_html.py
+load_wos_to_db.py
+migrations/add_journal_refactor_fields.sql
+migrations/backup_before_refactor_*.sql
+migrations/create_wos_journal_mirror_table.sql
+scrape_wos_sample.py
+scrape_wos_sample_v3.py
+services/journal_service.py
+test_improve_scraping.py
+test_wos_scraper.py
+wos_debug_gut.xlsx
+wos_full_database.xlsx
+wos_full_database_v2.xlsx
+wos_sample_data_v2.xlsx
+~$wos_full_database.xlsx

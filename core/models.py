@@ -3,7 +3,7 @@ SQLAlchemy Models for CECAN Platform
 Database models implementing authentication, compliance, and administrative management.
 """
 
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, Text, ForeignKey, DateTime, Enum as SQLEnum, Float, JSON
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, Text, ForeignKey, DateTime, Enum as SQLEnum, Float, JSON, Date
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
 from datetime import datetime
@@ -45,11 +45,55 @@ class User(Base):
 # COMPLIANCE & AUDIT ("EL ROBOT")
 # ===========================
 
+
 class ComplianceStatus(str, enum.Enum):
     """Compliance validation status for ANID reporting."""
     OK = "Ok"                 # Fully compliant
     WARNING = "Warning"       # Missing optional information
     ERROR = "Error"           # Missing required information
+
+
+class Journal(Base):
+    """Scientific journals with impact metrics."""
+    __tablename__ = "journals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), unique=True, nullable=False, index=True)
+    publisher = Column(String(255), nullable=True)
+    issn = Column(String(50), nullable=True)
+    metrics_source = Column(String(50), default="UNKNOWN") # WOS, SCOPUS, ESTIMATED
+    
+    # Web of Science (JCR) Metrics
+    jif_current = Column(Float, nullable=True)
+    jif_year = Column(Integer, nullable=True)
+    jif_5year = Column(Float, nullable=True)
+    
+    # Scopus Metrics
+    scopus_citescore = Column(Float, nullable=True)
+    scopus_sjr = Column(Float, nullable=True)
+    scopus_snip = Column(Float, nullable=True)
+    
+    last_updated = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    categories = relationship("JournalCategory", back_populates="journal", cascade="all, delete-orphan")
+    publications = relationship("Publication", back_populates="journal")
+
+
+class JournalCategory(Base):
+    """Journal rankings per category."""
+    __tablename__ = "journal_categories"
+
+    id = Column(Integer, primary_key=True, index=True)
+    journal_id = Column(Integer, ForeignKey("journals.id"), nullable=False)
+    
+    category_name = Column(String(255), nullable=False)
+    source = Column(String(50), default="WOS") # WOS or SCOPUS
+    ranking = Column(String(50), nullable=True) # e.g. "8 / 137"
+    quartile = Column(String(10), nullable=True) # Q1, Q2, Q3, Q4
+    percentile = Column(Float, nullable=True) # e.g. 94.5
+    
+    journal = relationship("Journal", back_populates="categories")
 
 
 class Publication(Base):
@@ -76,6 +120,12 @@ class Publication(Base):
     author_metadata = Column(JSON, nullable=True)  # Stores author names and countries from ORCID API
     ai_journal_analysis = Column(JSON, nullable=True)  # AI-extracted journal metadata and quartile estimation
     quartile = Column(String(10), nullable=True, index=True) # Dedicated column for filtering (Q1, Q2, Q3, Q4)
+    
+    # New Fields for Refactor (Phase 1, 2, 3)
+    enrichment_status = Column(String(50), default="metadata_only", nullable=False, index=True)
+    last_enrichment_at = Column(DateTime, nullable=True)
+    journal_name_temp = Column(Text, nullable=True) # Temporary journal name from OpenAlex
+    publisher_temp = Column(Text, nullable=True)    # Temporary publisher name
 
     # COMPLIANCE AUDIT FIELDS (El Robot)
     has_valid_affiliation = Column(Boolean, default=False, nullable=False)
@@ -95,6 +145,9 @@ class Publication(Base):
     metrics_last_updated = Column(DateTime, nullable=True)
 
     # Relationships
+    journal_id = Column(Integer, ForeignKey("journals.id"), nullable=True)
+    journal = relationship("Journal", back_populates="publications")
+    
     researcher_connections = relationship("ResearcherPublication", back_populates="publication", cascade="all, delete-orphan")
     chunks = relationship("PublicationChunk", back_populates="publication", cascade="all, delete-orphan")
     impact_metrics = relationship("PublicationImpact", uselist=False, back_populates="publication", cascade="all, delete-orphan")
@@ -206,6 +259,14 @@ class StudentDetails(Base):
     
     # Documents (JSON paths)
     document_paths = Column(Text, nullable=True)  # JSON: {cert_validity: "path", thesis: "path"}
+    
+    # Document Management (ANID Reporting)
+    thesis_enrollment_document = Column(Text, nullable=True)  # Path to thesis enrollment with CECAN mark
+    thesis_enrollment_verified = Column(Boolean, default=False)  # Admin verified CECAN mark
+    regular_student_certificate = Column(Text, nullable=True)  # Path to regular student certificate
+    certificate_valid_until = Column(Date, nullable=True)  # Certificate expiration date
+    additional_documents = Column(JSON, nullable=True)  # {type: path} for other docs
+    documents_complete = Column(Boolean, default=False)  # All required docs present & verified
     
     member = relationship("AcademicMember", back_populates="student_details", foreign_keys=[member_id])
     tutor = relationship("AcademicMember", foreign_keys=[tutor_id])
@@ -423,28 +484,30 @@ class Student(Base):
     email = Column(String(255), nullable=True)
     rut = Column(String(20), nullable=True)  # Chilean ID
     
-    program = Column(SQLEnum(StudentProgram), nullable=False, default=StudentProgram.OTHER)
+    program = Column(String(255), nullable=True) # Changed from Enum to String to support original names
     university = Column(String(255), nullable=True)
     start_date = Column(DateTime, nullable=True)
     graduation_date = Column(DateTime, nullable=True)
     
-    status = Column(SQLEnum(StudentStatus), default=StudentStatus.ACTIVE, nullable=False)
+    status = Column(String(50), default="Activo", nullable=False) # Changed from Enum to String
+    
+    # WP Affiliation
+    wp_id = Column(Integer, ForeignKey("work_packages.id"), nullable=True)
+    wp = relationship("WorkPackage")
     
     # Relationships
     tutor_id = Column(Integer, ForeignKey("academic_members.id"), nullable=True)
     tutor = relationship("AcademicMember", foreign_keys=[tutor_id], backref="students_supervised")
+    tutor_name = Column(String(255), nullable=True) # Explicit name from import
     
     co_tutor_id = Column(Integer, ForeignKey("academic_members.id"), nullable=True)
     co_tutor = relationship("AcademicMember", foreign_keys=[co_tutor_id], backref="students_co_supervised")
+    co_tutor_name = Column(String(255), nullable=True) # Explicit name from import
     
     theses = relationship("Thesis", back_populates="student", cascade="all, delete-orphan")
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    @property
-    def tutor_name(self):
-        return self.tutor.full_name if self.tutor else None
 
 
 class Thesis(Base):
@@ -488,6 +551,30 @@ def drop_all_tables(db_path="cecan.db"):
     print(f"[WARNING] All tables dropped from {db_path}")
 
 
+
+class WosJournalMirror(Base):
+    """Mirror table for WOS Journal data (scraped)."""
+    __tablename__ = "wos_journal_mirror"
+
+    wos_id = Column(Integer, primary_key=True)           # El ID de la URL
+    journal_name = Column(Text, index=True)
+    status = Column(String(50))                   # Active, Discontinued
+    best_quartile = Column(String(10))            # Q1, Q2, Q3, Q4, N/A
+    best_ranking_percent = Column(String(20))     # Ej: "99.7%"
+    jif = Column(String(20))                      # Journal Impact Factor
+    five_year_jif = Column(String(20))            # 5-Year Impact Factor
+    issn = Column(String(20), index=True)
+    eissn = Column(String(20), index=True)
+    categories = Column(Text)                     # Lista separada por pipe
+    ranking_category = Column(Text)               # Categoría del mejor ranking
+    publisher = Column(Text)
+    country = Column(String(100))
+    full_ranking_raw = Column(Text)
+    source_url = Column(Text)
+    last_updated = Column(DateTime, default=datetime.utcnow)
+
+
 if __name__ == "__main__":
     # Create all tables when running this module directly
     create_all_tables()
+

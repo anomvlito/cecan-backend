@@ -5,7 +5,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session, joinedload
 
 from database.session import get_db
-from core.models import AcademicMember, ResearcherDetails, Project, Publication, ResearcherPublication, WorkPackage
+from core.models import AcademicMember, ResearcherDetails, Project, Publication, ResearcherPublication, WorkPackage, Journal, JournalCategory
 from schemas import PublicationSummarySchema, ResearcherSummarySchema
 from services.graph_service import build_graph_data
 
@@ -45,7 +45,7 @@ class PublicPublicationOut(BaseModel):
     ai_journal_analysis: Optional[dict] = None  # Added: AI Journal Analysis
     quartile: Optional[str] = None  # Added: Dedicated Quartile Column
     content: Optional[str] = None
-    content: Optional[str] = None
+    journal: Optional[dict] = None  # ✅ ADDED: Journal data with categories
     # Legacy impact metrics
     impact_metrics: Optional[dict] = None
     authors: List[ResearcherSummarySchema] = []
@@ -122,14 +122,16 @@ async def get_public_publications(db: Session = Depends(get_db)):
     Optimized to avoid N+1 queries and handle missing schema columns safely.
     """
     try:
-        # 1. Eager loading: Fetch publication, connection, and member in one query
+        # 1. Eager loading: Fetch publication, connection, member, AND journal
         publications = (
             db.query(Publication)
             .options(
                 joinedload(Publication.researcher_connections)
                 .joinedload(ResearcherPublication.member)
-                .joinedload(AcademicMember.researcher_details)
+                .joinedload(AcademicMember.researcher_details),
+                joinedload(Publication.journal).joinedload(Journal.categories)  # Load journal and its categories
             )
+            .order_by(Publication.id.desc())
             .all()
         )
         
@@ -149,6 +151,32 @@ async def get_public_publications(db: Session = Depends(get_db)):
                     # Safe navigation to avoid error if details is None
                     "avatar_url": details.url_foto if details else None
                 })
+            
+            # Serialize journal if exists
+            journal_data = None
+            if pub.journal:
+                journal_data = {
+                    "id": pub.journal.id,
+                    "name": pub.journal.name,
+                    "publisher": pub.journal.publisher,
+                    "jif_current": pub.journal.jif_current,
+                    "jif_year": pub.journal.jif_year,
+                    "jif_5year": pub.journal.jif_5year,
+                    "scopus_citescore": pub.journal.scopus_citescore,
+                    "scopus_sjr": pub.journal.scopus_sjr,
+                    "scopus_snip": pub.journal.scopus_snip,
+                    "last_updated": pub.journal.last_updated,
+                    "categories": [
+                        {
+                            "category_name": cat.category_name,
+                            "source": cat.source,
+                            "quartile": cat.quartile,
+                            "percentile": cat.percentile,
+                            "ranking": cat.ranking
+                        }
+                        for cat in pub.journal.categories
+                    ] if pub.journal.categories else []
+                }
             
             # 2. Use getattr to avoid crash if DB is missing new columns
             results.append({
@@ -170,7 +198,7 @@ async def get_public_publications(db: Session = Depends(get_db)):
                 "ai_journal_analysis": getattr(pub, "ai_journal_analysis", None), # Added: AI Journal Analysis
                 "quartile": getattr(pub, "quartile", None), # Added: Dedicated Quartile
                 "content": getattr(pub, "content", None),
-                "content": getattr(pub, "content", None),
+                "journal": journal_data,  # ✅ ADDED: Include journal data
                 # Legacy impact metrics
                 "impact_metrics": {
                     "citation_count": pub.impact_metrics.citation_count if pub.impact_metrics else None,

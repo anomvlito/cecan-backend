@@ -2,10 +2,9 @@
 External Metrics Routes - Atomic endpoints for testing external API integrations
 """
 
-from fastapi import APIRouter, HTTPException, Query, Depends
+from fastapi import APIRouter, HTTPException, Query, Depends, Body
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
-from typing import Dict, Any, List
 from typing import Dict, Any, List
 import os
 from datetime import datetime
@@ -13,12 +12,126 @@ from datetime import datetime
 from services.scraper_service import get_openalex_metrics, get_semantic_scholar_metrics
 from services.openalex_service import extract_publication_metadata
 from database.session import get_db
-from core.models import Publication
+from core.models import Publication, WosJournalMirror
 
 router = APIRouter(tags=["External Metrics"])
 
 
+@router.get("/wos-mirror/search")
+async def search_wos_mirror(
+    query: str = Query(..., min_length=2, description="Journal Name or ISSN"),
+    db: Session = Depends(get_db)
+) -> List[Dict[str, Any]]:
+    """
+    Search the local WOS Mirror database for journals.
+    Reads from the wos_journal_mirror table populated by the scraper.
+    """
+    q = query.strip()
+    
+    # Search logic: Exact match for ISSN, Fuzzy for Name
+    # We use ILIKE for case-insensitive search
+    
+    # Detect if query looks like ISSN (digit-digit)
+    is_mostly_digits =  sum(c.isdigit() for c in q) > 3
+    
+    base_query = db.query(WosJournalMirror)
+    
+    if is_mostly_digits:
+         results = base_query.filter(
+            or_(
+                WosJournalMirror.issn.ilike(f"%{q}%"),
+                WosJournalMirror.eissn.ilike(f"%{q}%")
+            )
+        ).limit(20).all()
+    else:
+        results = base_query.filter(
+            WosJournalMirror.journal_name.ilike(f"%{q}%")
+        ).limit(20).all()
+        
+    return [
+        {
+            "id": r.wos_id,
+            "journal_name": r.journal_name,
+            "issn": r.issn,
+            "eissn": r.eissn,
+            "best_quartile": r.best_quartile,
+            "best_ranking_percent": r.best_ranking_percent,
+            "jif": r.jif,
+            "jif_5year": r.five_year_jif,
+            "categories": r.categories,
+            "ranking_category": r.ranking_category, # Added logic to expose this field
+            "publisher": r.publisher,
+            "source_url": r.source_url
+        }
+        for r in results
+    ]
+
+
+
+@router.post("/openalex/search-journals")
+async def search_openalex_journals(
+    payload: Dict[str, str] = Body(..., example={"title": "Nature"})
+) -> List[Dict[str, Any]]:
+    """
+    Search for JOURNALS (Sources) in OpenAlex.
+    Useful for cross-validation with WOS Mirror.
+    """
+    import requests
+    query = payload.get("title", "").strip()
+    if not query:
+        return []
+        
+    url = "https://api.openalex.org/sources"
+    params = {
+        "search": query,
+        "filter": "type:journal", # Fixed: was bg_filter
+        "per_page": 10,
+        "mailto": "admin@cecan.cl"
+    }
+    
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code != 200:
+            print(f"OpenAlex Error: {r.status_code}")
+            return []
+            
+        data = r.json()
+        results = []
+        
+        for item in data.get("results", []):
+            # Extract relevant metrics
+            metrics = item.get("summary_stats", {})
+            
+            # Extract ISSNs
+            issn_l = item.get("issn_l")
+            issns = item.get("issn", [])
+            
+            # Map to our standard format
+            journal = {
+                "id": item.get("id"),
+                "journal_name": item.get("display_name"),
+                "publisher": item.get("host_organization_name"),
+                "issn": issn_l,
+                "eissn": issns[0] if issns else None,
+                "country": item.get("country_code"),
+                "impact_factor_2yr": metrics.get("2yr_mean_citedness"),
+                "h_index": metrics.get("h_index"),
+                "works_count": item.get("works_count"),
+                "cited_by_count": item.get("cited_by_count"),
+                "homepage_url": item.get("homepage_url"),
+                "source": "openalex"
+            }
+            results.append(journal)
+            
+        return results
+        
+    except Exception as e:
+        print(f"OpenAlex Exception: {e}")
+        return []
+
+
 @router.get("/publication-metrics")
+
 async def get_publication_metrics_by_doi(
     doi: str = Query(..., description="DOI of the publication (e.g., 10.1038/s41586-020-2649-2)")
 ) -> Dict[str, Any]:
@@ -555,4 +668,132 @@ async def repair_bad_dois(
             
         results["details"].append(detail)
         
-    return results
+
+# --- AI JOURNAL ANALYSIS (STATELESS) ---
+
+JOURNAL_METRICS_PROMPT_TEMPLATE = """Actúa como un experto en bibliometría.
+⚠️ INSTRUCCIÓN CRÍTICA: DEBES USAR LA HERRAMIENTA DE BÚSQUEDA DE GOOGLE (Google Search).
+NO uses tu conocimiento interno pre-entrenado. Busca en internet los datos AHORA MISMO.
+
+Objetivo: Buscar el JIF (Impact Factor) y Cuartiles más recientes (2024 o 202) para:
+Revista: {journal_name}
+Editorial: {publisher}
+
+Reporte requerido (JSON):
+1. **JIF más reciente**: Busca explícitamente "Journal Impact Factor {journal_name} 2024" o "2025".
+   - Si encuentras el JIF Released en Junio 2024 (que corresponde a datos 2023), úsalo pero acláralo.
+   - Si encuentras JIF 2024 real (publicado en 2025), mejor.
+2. **Categorías**: Las 5 principales. Prioriza WOS (JCR). Si no, Scopus (SJR).
+
+NO INVENTES DATOS. Si no encuentras el dato exacto 2024, di "N/A".
+
+--- FORMATO JSON EXACTO ---
+{{
+  "jif_current": 2.6,
+  "jif_year": 2023,
+  "jif_5year": 3.2,
+  "scopus_sjr": 0.803,
+  "scopus_snip": 1.065,
+  "categories": [
+    {{
+      "category_name": "Multidisciplinary Sciences",
+      "quartile": "Q1",
+      "percentile": 67.4,
+      "ranking": "48/134",
+      "source": "WOS"
+    }}
+  ],
+  "reasoning": "Busqué en Google y encontré el JCR 2023 released en Junio 2024 en [fuente]."
+}}
+"""
+
+@router.post("/analyze-journal-ai")
+async def analyze_journal_ai(
+    payload: Dict[str, str] = Body(..., examples=[{"journal_name": "Nature", "publisher": "Springer"}])
+) -> Dict[str, Any]:
+    """
+    Stateless endpoint to analyze a journal using Gemini with Google Search Grounding.
+    Does not require the journal to exist in the database.
+    """
+    import google.generativeai as genai
+    from google.generativeai import types
+    import json
+    
+    journal_name = payload.get("journal_name", "Unknown")
+    publisher = payload.get("publisher", "Unknown")
+    
+    api_key = os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="Google API Key not configured")
+
+    # Usamos gemini-1.5-flash para balancear velocidad/costo (Free Tier incluye 1500 queries/dia)
+    model_name = os.environ.get("GEMINI_MODEL_NAME", "gemini-1.5-flash")
+
+    try:
+        # INTENTO 1: Con GROUNDING (Calidad Premium "Google Search")
+        # Sintaxis validada: {'google_search_retrieval': {}}
+        tools = [{'google_search_retrieval': {}}]
+        
+        model_grounded = genai.GenerativeModel(
+            model_name=model_name,
+            tools=tools
+        )
+        
+        prompt = JOURNAL_METRICS_PROMPT_TEMPLATE.format(
+            journal_name=journal_name,
+            publisher=publisher
+        )
+        
+        # print(f"🤖 [AI-Ext] Intentando con Grounding...")
+        
+        response = model_grounded.generate_content(
+            prompt,
+            generation_config=types.GenerationConfig(
+                temperature=0.1,
+                max_output_tokens=2048,
+                response_mime_type="application/json"
+            )
+        )
+        
+    except Exception as e_grounding:
+        # FALLBACK: Si falla el Grounding (API Error 400, Cuota, etc), usar modelo base
+        print(f"⚠️ [AI-Ext] Falló Grounding ({e_grounding}). Usando Fallback sin búsqueda.")
+        
+        model_fallback = genai.GenerativeModel(model_name=model_name) # Sin tools
+        
+        response = model_fallback.generate_content(
+            prompt, # Reusamos el mismo prompt
+            generation_config=types.GenerationConfig(
+                temperature=0.1, # Un poco más creativo para compensar falta de datos
+                max_output_tokens=2048,
+                response_mime_type="application/json"
+            )
+        )
+    
+    # Procesamiento común de la respuesta (sea Grounded o Fallback)
+    try:
+        result_text = response.text
+        
+        # Clean markdown
+        if "```json" in result_text:
+            result_text = result_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in result_text:
+            result_text = result_text.split("```")[0].strip()
+            
+        data = json.loads(result_text)
+        
+        # Agregar metadata de grounding si existe (Solo vendrá del Intento 1)
+        grounding_urls = []
+        if hasattr(response, 'grounding_metadata') and response.grounding_metadata:
+             for chunk in response.grounding_metadata.grounding_chunks:
+                if hasattr(chunk, 'web'):
+                    grounding_urls.append(chunk.web.uri)
+        
+        data["grounding_urls"] = grounding_urls[:5] # Top 5 fuentes
+        
+        return data
+
+    except Exception as e:
+        print(f"❌ [AI-Ext] Error procesando respuesta: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+

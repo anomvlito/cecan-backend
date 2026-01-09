@@ -1,6 +1,6 @@
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, date
 from enum import Enum
 
 # Enums
@@ -42,7 +42,15 @@ class StudentDetailsBase(BaseModel):
     program_start: Optional[datetime] = None
     thesis_start: Optional[datetime] = None
     defense_date: Optional[datetime] = None
-    document_paths: Optional[str] = None # JSON string
+    document_paths: Optional[str] = None
+    
+    # Document Management
+    thesis_enrollment_document: Optional[str] = None
+    thesis_enrollment_verified: bool = False
+    regular_student_certificate: Optional[str] = None
+    certificate_valid_until: Optional[date] = None
+    additional_documents: Optional[dict] = None
+    documents_complete: bool = False # JSON string
 
 class AcademicMemberBase(BaseModel):
     rut: Optional[str] = None
@@ -142,17 +150,51 @@ class ResearchOpportunityOut(BaseModel):
     class Config:
         from_attributes = True
 
+class JournalCategoryOut(BaseModel):
+    category_name: str
+    source: str
+    quartile: Optional[str]
+    percentile: Optional[float]
+    ranking: Optional[str]
+
+    class Config:
+        from_attributes = True
+
+class JournalOut(BaseModel):
+    id: int
+    name: str
+    publisher: Optional[str]
+    jif_current: Optional[float]
+    jif_year: Optional[int]
+    jif_5year: Optional[float]
+    scopus_citescore: Optional[float]
+    scopus_sjr: Optional[float] 
+    scopus_snip: Optional[float]
+    metrics_source: Optional[str]  # ← NUEVO: "WOS" o "SCOPUS"
+    last_updated: Optional[datetime]
+    categories: List[JournalCategoryOut] = []
+
+    class Config:
+        from_attributes = True
+
 class PublicationOut(BaseModel):
     id: int
     title: str
     year: Optional[str] = None
     url: Optional[str] = None
-    canonical_doi: Optional[str] = None # Matched model field name
+    canonical_doi: Optional[str] = None
     
-    # New Fields
+    # Estado de enriquecimiento (NUEVO)
+    enrichment_status: str = "metadata_only"  # ← NUEVO
+    
+    # Resúmenes (opcionales)
     summary_es: Optional[str] = None
     summary_en: Optional[str] = None
     
+    # Relación con revista
+    journal: Optional[JournalOut] = None
+    
+    # Metadata de OpenAlex
     metrics_data: Optional[Dict[str, Any]] = None
     
     class Config:
@@ -165,10 +207,11 @@ class PublicationUpdate(BaseModel):
     url: Optional[str] = None
     canonical_doi: Optional[str] = None
     
-    # English fields direct access
+    # Resúmenes
     summary_es: Optional[str] = None
     summary_en: Optional[str] = None
-    quartile: Optional[str] = None # Added for manual update
+    
+    # Autores
     author_ids: Optional[List[int]] = None
     
     class Config:
@@ -220,15 +263,18 @@ class ThesisOut(ThesisBase):
 
 class StudentBase(BaseModel):
     full_name: str
-    email: Optional[EmailStr] = None
+    email: Optional[str] = None  # Relaxed from EmailStr to handle legacy dirty data
     rut: Optional[str] = None
-    program: StudentProgramEnum = StudentProgramEnum.OTHER
+    program: Optional[str] = None
     university: Optional[str] = None
     start_date: Optional[datetime] = None
     graduation_date: Optional[datetime] = None
-    status: StudentStatusEnum = StudentStatusEnum.ACTIVE
+    status: Optional[str] = "Activo"
     tutor_id: Optional[int] = None
     co_tutor_id: Optional[int] = None
+    tutor_name: Optional[str] = None
+    co_tutor_name: Optional[str] = None
+    wp_id: Optional[int] = None
 
 class StudentCreate(StudentBase):
     pass
@@ -243,9 +289,6 @@ class StudentOut(StudentBase):
     created_at: Optional[datetime]
     updated_at: Optional[datetime]
     theses: List[ThesisOut] = []
-    
-    # We might want to include Tutor names in the output (populated by service)
-    tutor_name: Optional[str] = None
     
     class Config:
         from_attributes = True

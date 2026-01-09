@@ -14,7 +14,8 @@ from database.session import get_db
 from core.security import require_editor, get_current_user
 from core.models import User
 from services import scraper_service, compliance_service, publication_service
-from core.models import Publication, ResearcherPublication, AcademicMember, PublicationImpact
+from services.ingestion_service import ingestion_service
+from core.models import Publication, ResearcherPublication, AcademicMember, PublicationImpact, PublicationChunk
 from schemas import PublicationUpdate, PublicationOut
 
 router = APIRouter(prefix="/publications", tags=["Publications"])
@@ -138,6 +139,14 @@ async def extract_missing_dois(
                 # Try to extract DOI from text
                 doi_url = extract_doi(pub.content)
                 
+                # FALLBACK: OpenAlex Search by Title
+                if not doi_url and pub.title and len(pub.title) > 10:
+                    from services import openalex_service
+                    match = openalex_service.search_publication_by_title(pub.title)
+                    if match and match.get("doi"):
+                        doi_url = match.get("doi")
+                        print(f"[Extract DOIs] Recovered DOI by title '{pub.title[:30]}...': {doi_url}")
+                
                 if doi_url:
                     dois_found += 1
                     clean_doi = extract_doi_from_url(doi_url)
@@ -187,156 +196,37 @@ async def extract_missing_dois(
 @router.post("/upload")
 async def upload_pdf(
     file: UploadFile = File(...),
-    skip_ai: bool = Form(False),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_editor)
 ):
     """
     Upload a PDF publication with data enrichment.
+    FASE 1 SIMPLIFICADA: Solo extrae metadata desde OpenAlex.
+    Los resúmenes se generan después con /generate-summaries
     """
     try:
         content = await file.read()
         
-        # Validate PDF
-        is_valid, error_msg = publication_service.validate_pdf_file(file.filename, content)
-        if not is_valid:
-            raise HTTPException(status_code=400, detail=error_msg)
-        
-        clean_title = file.filename.replace('.pdf', '').replace('_', ' ')
-        
-        # Check duplicate by title
-        existing_pub = db.query(Publication).filter(
-            Publication.title == clean_title # Renamed from titulo
-        ).first()
-        
-        if existing_pub:
-            return {
-                "id": existing_pub.id,
-                "status": "duplicate",
-                "message": f"Publication duplicate: ID {existing_pub.id}"
-            }
-        
-        # Enrich data
-        enriched_data = publication_service.enrich_publication_data(content, file.filename, db, skip_ai=skip_ai)
-        
-        # Save PDF file to disk
-        pdf_directory = "data/publications"
-        os.makedirs(pdf_directory, exist_ok=True)
-        safe_filename = file.filename.replace(' ', '_').replace('/', '_')
-        file_path = os.path.join(pdf_directory, safe_filename)
-        
-        with open(file_path, 'wb') as f:
-            f.write(content)
-        
-        print(f"   [System] Saved PDF to: {file_path}")
-        
-        # Determine authors string
-        author_names = []
-        if enriched_data["matched_author_ids"]:
-            authors = db.query(AcademicMember).filter(
-                AcademicMember.id.in_(enriched_data["matched_author_ids"])
-            ).all()
-            author_names = [a.full_name for a in authors]
-        
-        autores_str = ", ".join(author_names) if author_names else "Unknown Authors"
-        
-        # Smart Year Detection + Metrics from OpenAlex (graceful degradation)
-        publication_year = str(datetime.now().year)  # Fallback
-        openalex_metrics = None
-        canonical_doi_value = enriched_data.get("doi")
-        doi_status = "pending"
-        
-        if canonical_doi_value:
-            try:
-                from services.openalex_service import get_publication_by_doi, extract_publication_metadata
-                print(f"   [OpenAlex] Fetching metadata for DOI: {canonical_doi_value}")
-                openalex_data = get_publication_by_doi(canonical_doi_value)
-                openalex_metrics = extract_publication_metadata(openalex_data)
-                doi_status = "valid_openalex"
-                
-                # Extract year and title from OpenAlex
-                if openalex_metrics:
-                    if openalex_metrics.get("publication_year"):
-                        publication_year = str(openalex_metrics["publication_year"])
-                        print(f"   [OpenAlex] ✅ Year detected: {publication_year}")
-                    
-                    if openalex_metrics.get("title"):
-                        clean_title = openalex_metrics["title"]
-                        print(f"   [OpenAlex] ✅ Title detected: {clean_title}")
-
-            except Exception as e:
-                print(f"   [OpenAlex] ⚠️  Could not fetch metadata: {e}")
-                # Continue with defaults - don't crash upload
-        
-        # Extract ORCIDs from PDF hyperlinks
-        orcids_list = []
-        author_metadata = None
-        try:
-            from services.orcid_metadata_service import (
-                extract_orcids_from_pdf_hyperlinks,
-                enrich_orcids_with_metadata
-            )
-            
-            orcids_list = extract_orcids_from_pdf_hyperlinks(content)
-            if orcids_list:
-                print(f"   [ORCID] Found {len(orcids_list)} ORCIDs in PDF hyperlinks")
-                author_metadata = enrich_orcids_with_metadata(orcids_list)
-        except Exception as orcid_error:
-            print(f"   [ORCID] Warning: Could not extract ORCID metadata: {orcid_error}")
-        
-        # Create Publication
-        new_pub = Publication(
-            title=clean_title,
-            authors=autores_str,
-            year=publication_year,
-            url=enriched_data.get("doi_url"),
-            local_path=file_path,  # Add saved file path
-            content=enriched_data.get("text", ""),
-            summary_es=enriched_data.get("resumen_es"),
-            summary_en=enriched_data.get("resumen_en"),
-            canonical_doi=canonical_doi_value,
-            doi_verification_status=doi_status,
-            extracted_orcids=",".join(orcids_list) if orcids_list else None,  # Store ORCIDs
-            author_metadata=author_metadata,  # Store author countries and names
-            ai_journal_analysis=enriched_data.get("ai_journal_analysis"), # Store AI journal analysis
-            quartile=enriched_data.get("ai_journal_analysis", {}).get("quartile_estimate")[:2] if enriched_data.get("ai_journal_analysis") and enriched_data.get("ai_journal_analysis").get("quartile_estimate") else None, # Store Quartile
-            metrics_data=openalex_metrics if openalex_metrics else None,
-            metrics_last_updated=datetime.utcnow() if openalex_metrics else None,
-            has_funding_ack=False,
-            anid_report_status="Pending"
+        # Delegate complex ingestion logic to service layer
+        # skip_ai ya no es necesario (siempre es True internamente)
+        result = ingestion_service.process_pdf_ingestion(
+            file_content=content, 
+            filename=file.filename, 
+            db=db
         )
         
-        db.add(new_pub)
-        db.commit()
-        db.refresh(new_pub)
-        
-        # Create relations
-        for author_id in enriched_data["matched_author_ids"]:
-            connection = ResearcherPublication(
-                member_id=author_id,
-                publication_id=new_pub.id, # Renamed
-                match_score=100,
-                match_method="text_match"
-            )
-            db.add(connection)
-        
-        db.commit()
-        
-        # RAG Indexing
-        from services.rag_service import get_semantic_engine
-        rag_result = {"success": False}
-        if new_pub.content and len(new_pub.content) > 100:
-            try:
-                engine = get_semantic_engine()
-                rag_result = engine.process_single_publication(new_pub.id)
-            except Exception as e:
-                print(f"RAG Indexing failed: {e}")
+        return result
 
+    except ValueError as ve:
+        # Validation errors (e.g. invalid PDF)
+        raise HTTPException(status_code=400, detail=str(ve))
+    
+    except Exception as e:
+        # Unexpected server errors
+        print(f"Error in upload_pdf endpoint: {e}")
         return {
-            "id": new_pub.id,
-            "status": "success",
-            "message": "PDF uploaded and enriched successfully",
-            "rag_indexed": rag_result.get("success", False)
+            "status": "error",
+            "message": f"Server error processing upload: {str(e)}"
         }
 
     except HTTPException:
@@ -525,6 +415,7 @@ async def sync_metadata_batch(
     Batch synchronize metadata (Title, Year, Metrics) from OpenAlex for all publications with DOIs.
     """
     from services.openalex_service import get_publication_by_doi, extract_publication_metadata
+    from services import journal_service
     
     query = db.query(Publication).filter(Publication.canonical_doi.isnot(None))
     
@@ -571,6 +462,20 @@ async def sync_metadata_batch(
              pub.metrics_last_updated = datetime.utcnow()
              pub.doi_verification_status = "valid_openalex"
              
+             # Link Journal
+             if meta.get("journal_name"):
+                 try:
+                     publisher = None
+                     # Try to get publisher if available in raw data (not currently in meta dict, might need adjustment if critical)
+                     # For now, get_or_create handles it.
+                     journal = journal_service.get_or_create_journal(db, meta["journal_name"], None)
+                     if journal and pub.journal_id != journal.id:
+                         pub.journal_id = journal.id
+                         changed = True
+                         print(f"   [Sync] Linked Journal ID {pub.id}: {journal.name}")
+                 except Exception as je:
+                     print(f"   [Sync] Warning linking journal for {pub.id}: {je}")
+             
              if changed or True: # Count as updated if we refreshed metrics
                 updated_count += 1
              
@@ -603,14 +508,23 @@ def generate_summary(
         raise HTTPException(status_code=404, detail="Publication not found")
     
     # Use text from database instead of reading PDF file
-    if not pub.content or len(pub.content) < 50:
+    text_content = pub.content
+    
+    # Fallback: Try to reconstruct from chunks if content is missing
+    if not text_content or len(text_content) < 50:
+         chunks = db.query(PublicationChunk).filter(PublicationChunk.publication_id == pub_id).order_by(PublicationChunk.chunk_index).all()
+         if chunks:
+             print(f"   [Summary] Reconstructing text from {len(chunks)} chunks for pub {pub_id}")
+             text_content = "\n".join([c.content for c in chunks])
+    
+    if not text_content or len(text_content) < 50:
          raise HTTPException(status_code=400, detail="Publication has no text content in database")
-         
+    
     try:
         from services.publication_service import analyze_text_with_ai
         
         # Call the unified analysis function
-        analysis = analyze_text_with_ai(pub.content)
+        analysis = analyze_text_with_ai(text_content)
         
         es = analysis.get("summary_es")
         en = analysis.get("summary_en")
@@ -697,3 +611,52 @@ def link_to_openalex(
         print(f"Error linking to OpenAlex: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# ========== JOURNAL ENRICHMENT ENDPOINT ==========
+@router.post("/journals/{journal_id}/enrich")
+async def enrich_journal_metrics(
+    journal_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_editor)
+):
+    """
+    Manually trigger AI enrichment for a specific journal.
+    This will fetch JIF, SJR, CiteScore, SNIP, and Categories using Gemini AI.
+    
+    Requires: Editor permissions
+    """
+    from core.models import Journal
+    from services import journal_service
+    
+    # Check if journal exists
+    journal = db.query(Journal).filter(Journal.id == journal_id).first()
+    if not journal:
+        raise HTTPException(status_code=404, detail=f"Journal with ID {journal_id} not found")
+    
+    print(f"\n🔄 [Manual Enrichment] Starting enrichment for Journal ID: {journal_id} - {journal.name}")
+    
+    try:
+        # Call enrichment service
+        journal_service.enrich_journal_metrics(db, journal_id)
+        
+        # Refresh to get updated data
+        db.refresh(journal)
+        
+        return {
+            "status": "success",
+            "message": f"Journal '{journal.name}' enriched successfully",
+            "journal": {
+                "id": journal.id,
+                "name": journal.name,
+                "jif_current": journal.jif_current,
+                "scopus_sjr": journal.scopus_sjr,
+                "categories_count": len(journal.categories) if journal.categories else 0
+            }
+        }
+        
+    except Exception as e:
+        print(f"❌ [Manual Enrichment] Error: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to enrich journal: {str(e)}"
+        )

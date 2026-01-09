@@ -262,29 +262,45 @@ def analyze_text_with_ai(text: str, api_key: Optional[str] = None) -> Dict:
 TAREAS:
 1. Generar resumen en ESPAÑOL (max 150 palabras)
 2. Generar resumen en INGLÉS (max 150 words)
-3. Detectar nombre de la revista científica (Journal Name)
-4. Estimar cuartil (Q1-Q4) basado en tu conocimiento del journal. Si no sabes, usa "Unknown".
-5. Estimar H-Index aproximado de la revista (número entero).
-6. Generar enlace de búsqueda exacto para SCImago Journal Rank.
+3. EXTRAER SOLO EL NOMBRE DE LA REVISTA donde se publicó
+4. EXTRAER TÍTULO EXACTO DEL PAPER
+
+IMPORTANTE: 
+- NO busques métricas (JIF, SJR, cuartiles, etc.) - eso se hará después manualmente.
+- Solo identifica el NOMBRE de la revista.
 
 FORMATO DE RESPUESTA (JSON PURO):
 {{
-  "summary_es": "...",
-  "summary_en": "...",
+  "title": "Título exacto identificado del paper",
+  "summary_es": "Resumen en español...",
+  "summary_en": "Summary in english...",
   "journal_analysis": {{
-    "journal_name": "Nombre de la Revista",
-    "quartile_estimate": "Q1",
-    "h_index_estimate": 150,
-    "scimago_search_url": "https://www.scimagojr.com/journalsearch.php?q=...",
-    "reasoning": "Breve explicación de por qué clasificaste así..."
+    "journal_name": "Nombre exacto de la Revista",
+    "reasoning": "Breve nota de dónde encontré el nombre (ej: header del PDF, metadata)"
   }}
 }}
 
 TEXTO:
 {text_sample}"""
 
+        # ============== DEBUG LOGGING - EASY TO REMOVE ==============
+        print("\n" + "="*80)
+        print(f"🤖 [AI PROMPT] Publication Analysis (Summary + Journal)")
+        print("="*80)
+        print(prompt)
+        print("="*80 + "\n")
+        # ============================================================
+
         response = call_gemini_generate_with_retry(model, prompt)
         result_text = response.text
+        
+        # ============== DEBUG LOGGING - EASY TO REMOVE ==============
+        print("\n" + "="*80)
+        print(f"✅ [AI RESPONSE] Publication Analysis")
+        print("="*80)
+        print(result_text)
+        print("="*80 + "\n")
+        # ============================================================
         
         # Clean markdown formatting if present
         if "```json" in result_text:
@@ -345,6 +361,7 @@ def enrich_publication_data(file_bytes: bytes, filename: str, db: Session, skip_
         "matched_author_ids": [],
         "resumen_es": "",
         "resumen_en": "",
+        "ai_extracted_title": None,  # New field
         "processing_notes": []
     }
     
@@ -387,7 +404,8 @@ def enrich_publication_data(file_bytes: bytes, filename: str, db: Session, skip_
         result["resumen_es"] = analysis.get("summary_es")
         result["resumen_en"] = analysis.get("summary_en")
         result["ai_journal_analysis"] = analysis.get("journal_analysis")
-        result["processing_notes"].append("Análisis IA completado (Resumen + Journal)")
+        result["ai_extracted_title"] = analysis.get("title") # Capture title
+        result["processing_notes"].append("Análisis IA completado (Resumen + Journal + Título)")
     else:
         placeholders = _generate_placeholder_summaries()
         result["resumen_es"] = placeholders[0]
@@ -398,6 +416,38 @@ def enrich_publication_data(file_bytes: bytes, filename: str, db: Session, skip_
             result["processing_notes"].append("Resumen IA omitido por usuario (Fast Path)")
         else:
             result["processing_notes"].append("Texto insuficiente para generar resumen")
+
+    # FALLBACK: If DOI is still missing, try to search in OpenAlex by Title
+    if not result["doi"]:
+        from services import openalex_service
+        
+        search_title = result.get("ai_extracted_title")
+        
+        # Fallback to filename if AI didn't provide title
+        if not search_title:
+             # Heuristic clean filename
+             clean_name = filename.replace('.pdf', '').replace('_', ' ')
+             # Remove common prefixes like '2024- ', '24- '
+             import re
+             clean_name = re.sub(r'^\d{2,4}[-_]\s*', '', clean_name)
+             search_title = clean_name
+        
+        if search_title and len(search_title) > 5:
+            result["processing_notes"].append(f"Intentando buscar DOI por título: {search_title[:50]}...")
+            match = openalex_service.search_publication_by_title(search_title)
+            
+            if match and match.get("doi"):
+                doi_url = match.get("doi")
+                # Clean DOI
+                clean_doi = doi_url.split("doi.org/")[-1] if "doi.org/" in doi_url else doi_url.replace("https://doi.org/", "")
+                
+                result["doi"] = clean_doi
+                result["doi_url"] = doi_url
+                # We could also use match['title'] to correct the title later?
+                # But ingestion_service handles metadata fetching.
+                result["processing_notes"].append(f"✅ DOI encontrado en OpenAlex: {clean_doi}")
+            else:
+                result["processing_notes"].append("❌ No se encontró DOI en OpenAlex por título")
     
     return result
 
@@ -452,3 +502,96 @@ Texto del artículo:
          resumen_es = result_text
          
     return resumen_es, resumen_en
+
+
+def generate_summaries_only(text: str) -> dict:
+    """
+    FASE 2 (SIMPLIFICADA): Genera SOLO resúmenes ES/EN.
+    
+    NO busca métricas de revista (eso se hace en FASE 3 con Google Search).
+    Modelo rápido sin grounding.
+    
+    Args:
+        text: Contenido extraído del PDF
+        
+    Returns:
+        dict con keys: summary_es, summary_en
+    """
+    import json
+    import google.generativeai as genai
+    
+    api_key = os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        print("WARNING: GOOGLE_API_KEY not found")
+        return {
+            "summary_es": "API Key no configurada",
+            "summary_en": "API Key not configured"
+        }
+    
+    genai.configure(api_key=api_key)
+    model_name = os.environ.get("GEMINI_MODEL_NAME", "gemini-2.0-flash-exp")
+    model = genai.GenerativeModel(model_name)
+    
+    # Limitar texto para no exceder límites de tokens
+    text_sample = text[:50000] if len(text) > 50000 else text
+    
+    prompt = f"""Analiza este texto de una publicación científica y genera dos resúmenes:
+
+1. Resumen en ESPAÑOL (máximo 150 palabras):
+   - Objetivo del estudio
+   - Metodología principal
+   - Resultados clave
+   - Conclusión
+
+2. Summary in ENGLISH (maximum 150 words):
+   - Study objective
+   - Main methodology
+   - Key results
+   - Conclusion
+
+IMPORTANTE:
+- Solo genera resúmenes, NO extraigas nombre de revista ni métricas
+- Devuelve ÚNICAMENTE un JSON válido
+
+FORMATO:
+{{
+  "summary_es": "Resumen en español aquí...",
+  "summary_en": "Summary in english here..."
+}}
+
+TEXTO:
+{text_sample}
+"""
+    
+    print(f"   [AI] Generating summaries with {model_name}...")
+    
+    try:
+        response = call_gemini_generate_with_retry(model, prompt)
+        result_text = response.text
+        
+        # Limpiar markdown si está presente
+        if "```json" in result_text:
+            result_text = result_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in result_text:
+            result_text = result_text.split("```")[1].split("```")[0].strip()
+        
+        # Parsear JSON
+        try:
+            data = json.loads(result_text)
+            return {
+                "summary_es": data.get("summary_es", ""),
+                "summary_en": data.get("summary_en", "")
+            }
+        except json.JSONDecodeError as e:
+            print(f"   [AI] JSON parse error: {str(e)}")
+            print(f"   [AI] Response preview: {result_text[:200]}...")
+            
+            # Fallback: intentar extraer texto plano
+            return {
+                "summary_es": result_text[:500] if result_text else "Error generando resumen",
+                "summary_en": "Error generating summary"
+            }
+            
+    except Exception as e:
+        print(f"   [AI] Error: {str(e)}")
+        raise
