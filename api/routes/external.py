@@ -729,19 +729,19 @@ async def analyze_journal_ai(
     # Usamos gemini-1.5-flash para balancear velocidad/costo (Free Tier incluye 1500 queries/dia)
     model_name = os.environ.get("GEMINI_MODEL_NAME", "gemini-1.5-flash")
 
+    prompt = JOURNAL_METRICS_PROMPT_TEMPLATE.format(
+        journal_name=journal_name,
+        publisher=publisher
+    )
+
     try:
         # INTENTO 1: Con GROUNDING (Calidad Premium "Google Search")
-        # Sintaxis validada: {'google_search_retrieval': {}}
-        tools = [{'google_search_retrieval': {}}]
+        # Sintaxis validada: {'google_search': {}}
+        tools = [{'google_search': {}}]
         
         model_grounded = genai.GenerativeModel(
             model_name=model_name,
             tools=tools
-        )
-        
-        prompt = JOURNAL_METRICS_PROMPT_TEMPLATE.format(
-            journal_name=journal_name,
-            publisher=publisher
         )
         
         # print(f"🤖 [AI-Ext] Intentando con Grounding...")
@@ -797,3 +797,158 @@ async def analyze_journal_ai(
         print(f"❌ [AI-Ext] Error procesando respuesta: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@router.post("/triangulate")
+async def triangulate_journal_data(
+    payload: Dict[str, str] = Body(..., examples=[{"query": "10.1007/s10120-024-01578-3"}], description="Query can be a DOI, Title or ISSN"),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """
+    MASTER ENDPOINT for Data Triangulation (Strict Sequential Flow).
+    
+    Flow requested by User:
+    1. OpenAlex (DOI) -> Get Journal Name & Source ID.
+    2. OpenAlex (Source ID) -> Get Exact Publisher (Imperative).
+    3. WOS Mirror -> Search by Journal Name (Local DB).
+    4. AI Analysis -> Use gathered Context.
+    """
+    import requests
+    
+    query = payload.get("query", "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query is required")
+    
+    # Context Variables
+    resolved_journal_name = query
+    resolved_publisher = "Unknown"
+    source_id = None
+    is_doi = query.startswith("10.") or "doi.org" in query
+    
+    status_log = ["Start"]
+    
+    # --- STEP 1: OPENALEX DOI LOOKUP (To get Journal Name) ---
+    if is_doi:
+        clean_doi = query.split('doi.org/')[-1] if 'doi.org/' in query else query
+        try:
+            url = f"https://api.openalex.org/works/https://doi.org/{clean_doi}"
+            r = requests.get(url, params={"mailto": "admin@cecan.cl"}, timeout=10)
+            
+            if r.status_code == 200:
+                data = r.json()
+                primary_loc = data.get("primary_location", {}) or {}
+                source = primary_loc.get("source", {}) or {}
+                
+                if source.get("display_name"):
+                    resolved_journal_name = source.get("display_name")
+                    source_id = source.get("id") # OpenAlex ID (e.g., https://openalex.org/S12345)
+                    status_log.append(f"Step 1: Resolved DOI to Journal '{resolved_journal_name}' (SourceID: {source_id})")
+                else:
+                    status_log.append("Step 1: DOI found but no Journal/Source info")
+            else:
+                 status_log.append(f"Step 1: OpenAlex DOI lookup failed ({r.status_code})")
+                 
+        except Exception as e:
+            print(f"Error Step 1: {e}")
+            status_log.append(f"Step 1 Error: {str(e)}")
+            
+    # --- STEP 2: OPENALEX SOURCE LOOKUP (Imperative Publisher) ---
+    # We do this if we have a Source ID from Step 1, OR if the user provided a Journal Name directly (search needed)
+    
+    if source_id:
+        # Direct lookup by ID
+        try:
+            # source_id usually looks like "https://openalex.org/S..." or just "S..."
+            # API expects just the ID usually or full URL works too
+            s_url = f"https://api.openalex.org/sources/{source_id}"
+            r_source = requests.get(s_url, params={"mailto": "admin@cecan.cl"}, timeout=10)
+            if r_source.status_code == 200:
+                s_data = r_source.json()
+                if s_data.get("host_organization_name"):
+                    resolved_publisher = s_data.get("host_organization_name")
+                    status_log.append(f"Step 2: Resolved Publisher '{resolved_publisher}' from Source ID")
+        except Exception as e:
+             status_log.append(f"Step 2 Error (ID lookup): {e}")
+
+    elif not is_doi:
+        # If it wasn't a DOI, we need to search for the journal in OpenAlex to get the publisher
+        try:
+             # Search sources by name
+             search_url = "https://api.openalex.org/sources"
+             params = {"search": resolved_journal_name, "filter": "type:journal", "per_page": 1}
+             r_search = requests.get(search_url, params=params, timeout=10)
+             if r_search.status_code == 200:
+                 res = r_search.json().get("results", [])
+                 if res:
+                     top_match = res[0]
+                     resolved_journal_name = top_match.get("display_name", resolved_journal_name) # Refine name
+                     resolved_publisher = top_match.get("host_organization_name", "Unknown")
+                     status_log.append(f"Step 2: Searched Journal, found Publisher '{resolved_publisher}'")
+        except Exception as e:
+             status_log.append(f"Step 2 Error (Search): {e}")
+
+    # --- STEP 3: WOS MIRROR SEARCH ---
+    # Now we have the best possible Journal Name and Publisher
+    results_wos = []
+    try:
+        # We search WOS Mirror using the resolved name
+        # We search fuzzy first to get potential candidates
+        base_results = await search_wos_mirror(query=resolved_journal_name, db=db)
+        
+        # Smart Filter: If we find an EXACT match, return only that one.
+        # This satisfies the user requirement "quiero que solo muestre el resultado exacto"
+        exact_matches = [
+            r for r in base_results 
+            if r['journal_name'].lower() == resolved_journal_name.lower()
+        ]
+        
+        if exact_matches:
+            results_wos = exact_matches
+        else:
+            results_wos = base_results
+
+        status_log.append(f"Step 3: WOS Mirror returned {len(results_wos)} results")
+    except Exception as e:
+        status_log.append(f"Step 3 Error: {e}")
+
+    # --- STEP 4: AI ANALYSIS ---
+    # Only if we have something meaningful
+    result_ai = None
+    try:
+        if resolved_journal_name and resolved_journal_name != query:
+             # Meaning we resolved something
+             status_log.append("Step 4: Running AI Analysis...")
+             result_ai = await analyze_journal_ai(payload={
+                 "journal_name": resolved_journal_name,
+                 "publisher": resolved_publisher
+             })
+        elif not is_doi and resolved_journal_name:
+             # Direct search case
+             status_log.append("Step 4: Running AI Analysis (Direct)...")
+             result_ai = await analyze_journal_ai(payload={
+                 "journal_name": resolved_journal_name,
+                 "publisher": resolved_publisher
+             })
+             
+    except Exception as e:
+        status_log.append(f"Step 4 Error: {e}")
+        result_ai = {"error": str(e)}
+
+    return {
+        "status": "success",
+        "resolved_query": {
+            "original": query,
+            "is_doi": is_doi,
+            "journal_name": resolved_journal_name,
+            "publisher": resolved_publisher
+        },
+        "wos_mirror": results_wos,
+        # We don't necessarily return a list of OpenAlex sources here since we used it for resolution
+        # But for UI consistency we can wrap the found journal in a list if found
+        "openalex_sources": [{
+             "journal_name": resolved_journal_name,
+             "publisher": resolved_publisher,
+             "source": "openalex (resolved)"
+        }] if resolved_publisher != "Unknown" else [],
+        "ai_analysis": result_ai,
+        "debug_log": status_log
+    }
