@@ -177,6 +177,31 @@ class JournalOut(BaseModel):
     class Config:
         from_attributes = True
 
+# Schema para métricas de impacto (MOVIDO ARRIBA)
+class PublicationImpactOut(BaseModel):
+    citation_count: int = 0
+    quartile: Optional[str] = None
+    jif: Optional[float] = None
+    ranking_percentile: Optional[float] = None
+    source: Optional[str] = None
+    is_international_collab: bool = False
+    
+    class Config:
+        from_attributes = True
+
+# Schema para la verificación WOS (MOVIDO ARRIBA)
+class WosVerificationOut(BaseModel):
+    match_type: str
+    quartile: Optional[str] = None
+    decile: Optional[int] = None
+    is_top_10: bool = False
+    source_url: Optional[str] = None
+    categories: List[str] = []
+    journal_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
 class PublicationOut(BaseModel):
     id: int
     title: str
@@ -197,6 +222,15 @@ class PublicationOut(BaseModel):
     # Metadata de OpenAlex
     metrics_data: Optional[Dict[str, Any]] = None
     
+    # Impact Metrics
+    impact_metrics: Optional[PublicationImpactOut] = None
+
+    # Temporal fields for incomplete matches
+    publisher_temp: Optional[str] = None
+    
+    # WOS Verification
+    wos_verification: Optional[WosVerificationOut] = None
+    
     class Config:
         from_attributes = True
         populate_by_name = True
@@ -213,6 +247,108 @@ class PublicationUpdate(BaseModel):
     
     # Autores
     author_ids: Optional[List[int]] = None
+    
+    class Config:
+        from_attributes = True
+        populate_by_name = True
+
+# Schema detallado de author para publicación
+class PublicationAuthorOut(BaseModel):
+    id: int
+    full_name: str
+    email: Optional[str] = None
+    institution: Optional[str] = None
+    
+    class Config:
+        from_attributes = True
+
+class PublicationDetailOut(BaseModel):
+    id: int
+    title: str
+    year: Optional[str] = None
+    url: Optional[str] = None
+    canonical_doi: Optional[str] = None
+    category: Optional[str] = None
+    
+    # Estado de enriquecimiento
+    enrichment_status: str = "metadata_only"
+    last_enrichment_at: Optional[datetime] = None
+    
+    # Resúmenes
+    summary_es: Optional[str] = None
+    summary_en: Optional[str] = None
+    
+    # Campos de auditoría
+    has_valid_affiliation: bool = False
+    has_funding_ack: bool = False
+    anid_report_status: str = "Pending"
+    last_audit_date: Optional[datetime] = None
+    audit_notes: Optional[str] = None
+    doi_verification_status: str = "pending"
+    
+    # Relación con revista
+    journal: Optional[JournalOut] = None
+    journal_name_temp: Optional[str] = None
+    publisher_temp: Optional[str] = None
+    
+    # Metadata de OpenAlex
+    metrics_data: Optional[Dict[str, Any]] = None
+    metrics_last_updated: Optional[datetime] = None
+    
+    # Métricas de impacto
+    impact_metrics: Optional[PublicationImpactOut] = None
+    
+    # Verificación WOS
+    wos_verification: Optional[WosVerificationOut] = None
+    
+    # Autores (extraídos desde researcher_connections)
+    authors: List[PublicationAuthorOut] = []
+    
+    @classmethod
+    def from_orm(cls, obj):
+        # Extract authors from researcher_connections
+        authors_list = []
+        if hasattr(obj, 'researcher_connections') and obj.researcher_connections:
+            for conn in obj.researcher_connections:
+                if conn.member:
+                    authors_list.append(PublicationAuthorOut(
+                        id=conn.member.id,
+                        full_name=conn.member.full_name,
+                        email=conn.member.email,
+                        institution=conn.member.institution
+                    ))
+        
+        # Build dict manually to avoid validation error on authors field
+        data = {
+            'id': obj.id,
+            'title': obj.title,
+            'year': obj.year,
+            'url': obj.url,
+            'category': obj.category,
+            'canonical_doi': obj.canonical_doi,
+            'doi_verification_status': obj.doi_verification_status,
+            'summary_es': obj.summary_es,
+            'summary_en': obj.summary_en,
+            'content': obj.content,
+            'has_valid_affiliation': obj.has_valid_affiliation,
+            'has_funding_ack': obj.has_funding_ack,
+            'anid_report_status': obj.anid_report_status,
+            'last_audit_date': obj.last_audit_date,
+            'audit_notes': obj.audit_notes,
+            'enrichment_status': obj.enrichment_status,
+            'last_enrichment_at': obj.last_enrichment_at,
+            'journal': obj.journal,
+            'journal_name_temp': obj.journal_name_temp,
+            'publisher_temp': obj.publisher_temp,
+            'quartile': obj.quartile,
+            'metrics_data': obj.metrics_data,
+            'metrics_last_updated': obj.metrics_last_updated,
+            'impact_metrics': obj.impact_metrics,
+            'wos_verification': None, # Populated manually in route
+            'authors': authors_list
+        }
+        
+        return cls(**data)
     
     class Config:
         from_attributes = True

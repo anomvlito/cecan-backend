@@ -64,7 +64,7 @@ class IngestionService:
 
         return {"status": "success", "synced": results}
 
-    def process_pdf_ingestion(self, file_content: bytes, filename: str, db: Session, skip_ai: bool = False) -> Dict[str, Any]:
+    def process_pdf_ingestion(self, file_content: bytes, filename: str, db: Session, skip_ai: bool = False, skip_rag: bool = False) -> Dict[str, Any]:
         """
         Orchestrate PDF ingestion process: Validation -> Upload -> Enrichment -> Save.
         """
@@ -143,27 +143,44 @@ class IngestionService:
                 openalex_data = get_publication_by_doi(canonical_doi_value)
                 metrics_data = extract_publication_metadata(openalex_data)
                 doi_verification_status = "valid_openalex"
-                
-                # Extract year and title from OpenAlex
-                if metrics_data:
-                    if metrics_data.get("publication_year"):
-                        publication_year = str(metrics_data["publication_year"])
-                    if metrics_data.get("title"):
-                        clean_title = metrics_data["title"]
-
             except Exception as e:
-                print(f"   [Ingestion] ⚠️ Could not fetch OpenAlex metadata: {e}")
+                print(f"   [Ingestion] ⚠️ Could not fetch OpenAlex metadata by DOI: {e}")
+        
+        # FALLBACK: Search by Title if DOI lookup failed or no DOI found
+        if not metrics_data:
+            try:
+                print(f"   [Ingestion] 🔍 DOI missing/failed. Searching OpenAlex by title: '{clean_title}'")
+                from services.openalex_service import search_publication_by_title
+                
+                # Use clean_title (filename based) or enrich title if better
+                search_title = enriched_data.get("title") or clean_title
+                match = search_publication_by_title(search_title)
+                
+                if match and match.get("doi"):
+                    print(f"   [Ingestion] ✅ Match found! DOI: {match.get('doi')}")
+                    canonical_doi_value = match.get("doi").replace("https://doi.org/", "")
+                    
+                    # Fetch full details now that we have DOI
+                    openalex_data = get_publication_by_doi(canonical_doi_value)
+                    metrics_data = extract_publication_metadata(openalex_data)
+                    doi_verification_status = "valid_openalex_by_title"
+            except Exception as e:
+                print(f"   [Ingestion] ⚠️ Title search failed: {e}")
+
+        # Update local variables from found metrics
+            except Exception as e:
+                print(f"   [Ingestion] ⚠️ Title search failed: {e}")
+
+        # Update local variables from found metrics
+        if metrics_data:
+            if metrics_data.get("publication_year"):
+                publication_year = str(metrics_data["publication_year"])
+            if metrics_data.get("title"):
+                clean_title = metrics_data["title"]
         
         # 6. Extract ORCIDs from PDF hyperlinks
         try:
             from services.orcid_metadata_service import extract_orcids_from_pdf_hyperlinks
-            # Note: We just extract for now, full enrichment usually happens if we want to create users.
-            # But the current controller just printed it? 
-            # Controller code: "author_metadata = enrich_orcids_with_metadata(orcids_list)"
-            # It didn't seem to USE it for the Publication creation?
-            # Let's check logic. It printed "Found ... ORCIDs". And "author_metadata".
-            # It seems it was for debugging or future use?
-            # I will include the extraction and print.
             orcids_list = extract_orcids_from_pdf_hyperlinks(file_content)
             if orcids_list:
                 print(f"   [Ingestion] Found {len(orcids_list)} ORCIDs in PDF hyperlinks: {orcids_list}")
@@ -175,13 +192,64 @@ class IngestionService:
         publisher = None
         
         try:
-            # Obtener de OpenAlex
-            if metrics_data and metrics_data.get("primary_location", {}).get("source"):
-                 detected_journal_name = metrics_data["primary_location"]["source"].get("display_name")
-                 publisher = metrics_data["primary_location"]["source"].get("host_organization_name")
-                 print(f"   [Ingestion] Journal from OpenAlex: {detected_journal_name} ({publisher})")
+            # Obtener de OpenAlex (metrics_data can come from DOI lookup OR title fallback)
+            if metrics_data and metrics_data.get("journal_name"):
+                 # Use top-level journal name if available (from extract_publication_metadata)
+                 detected_journal_name = metrics_data.get("journal_name")
+                 
+                 # =========== PUBLISHER EXTRACTION (3-TIER PRIORITY) ===========
+                 if 'openalex_data' in locals() and openalex_data:
+                     primary_loc = openalex_data.get("primary_location", {})
+                     source = primary_loc.get("source", {}) if primary_loc else {}
+                     
+                     # PRIORIDAD 1: Segunda llamada imperativa a OpenAlex (más confiable)
+                     source_id = source.get("id")
+                     if source_id:
+                         print(f"   [Ingestion] 🛡️ Imperative Second Call: Fetching full source details for {source_id}")
+                         from services.openalex_service import get_source_details
+                         source_details = get_source_details(source_id)
+                         if source_details and source_details.get("publisher"):
+                             publisher = source_details.get("publisher")
+                             print(f"   [Ingestion] ✅ Publisher from OpenAlex (2nd call): {publisher}")
+                     
+                     # PRIORIDAD 2: AI Extraction (Fallback si OpenAlex falla)
+                     if not publisher and enriched_data.get("ai_journal_analysis"):
+                         ai_publisher = enriched_data["ai_journal_analysis"].get("journal_publisher")
+                         if ai_publisher:
+                             publisher = ai_publisher
+                             print(f"   [Ingestion] ✅ Publisher from AI (fallback): {publisher}")
+                     
+                     # PRIORIDAD 3: Nested source object (último recurso)
+                     if not publisher:
+                         publisher = source.get("host_organization_name")
+                         if publisher:
+                             print(f"   [Ingestion] ✅ Publisher from nested source: {publisher}")
+                     
+                 print(f"   [Ingestion] Journal from OpenAlex: {detected_journal_name} ({publisher or 'Unknown Publisher'})")
+                 
+                 # 6.6 Check if this journal exists in WOS Mirror
+                 wos_match = None
+                 wos_match_type = None
+                 try:
+                     from services.journal_service import JournalMatchingService
+                     matcher = JournalMatchingService(db)
+                     wos_match, wos_match_type = matcher.find_best_match(
+                         journal_name=detected_journal_name,
+                         issn=metrics_data.get("issn"),
+                         publisher=publisher
+                     )
+                     if wos_match:
+                         print(f"   [Ingestion] 🎯 WOS Mirror: Found in database! (ID: {wos_match.wos_id})")
+                     else:
+                         print(f"   [Ingestion] ⚠️ WOS Mirror: Not found in database (will need manual verification)")
+                 except Exception as e:
+                     print(f"   [Ingestion] ⚠️ WOS Mirror check failed: {e}")
+                     wos_match = None  # Ensure it's None if error occurs
+                     wos_match_type = None
         except Exception as e:
             print(f"   [Ingestion] ⚠️ Journal extraction failed: {e}")
+            wos_match = None  # Set to None if outer try fails
+            wos_match_type = None
 
         # 7. Create Publication Record (FASE 1: Solo metadata)
         new_pub = Publication(
@@ -226,25 +294,71 @@ class IngestionService:
         
         db.commit()
         
-        # 9. RAG Indexing
-        rag_indexed = False
-        try:
-            from services.rag_service import get_semantic_engine
-            if new_pub.content and len(new_pub.content) > 100:
-                engine = get_semantic_engine()
-                # Assuming process_single_publication returns dict with 'success'
-                rag_result = engine.process_single_publication(new_pub.id)
-                rag_indexed = rag_result.get("success", False)
-                print(f"   [Ingestion] RAG Indexed: {rag_indexed}")
-        except Exception as e:
-            print(f"   [Ingestion] ⚠️ RAG Indexing failed: {e}")
+        # 9. Create Publication Impact Metrics from WOS Mirror (if matched)
+        if wos_match:
+            from core.models import PublicationImpact
+            print(f"   [Ingestion] 💾 Saving WOS Mirror metrics to PublicationImpact...")
+            
+            # Clean data types (WOS Mirror stores as strings)
+            ranking_percent = wos_match.best_ranking_percent
+            if isinstance(ranking_percent, str):
+                ranking_percent = float(ranking_percent.replace('%', '').strip())
+            
+            jif_value = wos_match.jif
+            if isinstance(jif_value, str):
+                jif_value = float(jif_value.strip()) if jif_value else None
+            
+            impact = PublicationImpact(
+                publication_id=new_pub.id,
+                quartile=wos_match.best_quartile,  # Q1, Q2, Q3, Q4
+                ranking_percentile=ranking_percent,  # Clean float
+                jif=jif_value,  # Clean float
+                is_international_collab=False,
+                source="wos_mirror",
+                match_confidence=wos_match_type,  # 'exact_issn', 'exact_name_verified', etc.
+                wos_journal_id=wos_match.wos_id
+            )
+            db.add(impact)
+            db.commit()
+            print(f"   [Ingestion] ✅ Impact metrics saved: {wos_match.best_quartile}, {ranking_percent}%")
+        else:
+            print(f"   [Ingestion] ⏭️ No WOS Mirror match - Impact metrics will be determined later")
         
+        if not skip_rag:
+            self.run_rag_indexing(new_pub.id, new_pub.content)
+            rag_indexed = True # Optimistic or fetch actual status later if needed
+            
         return {
             "id": new_pub.id,
             "status": "success",
             "message": f"Publication uploaded: {clean_title}",
-            "rag_indexed": rag_indexed
+            "rag_indexed": rag_indexed if not skip_rag else "background_pending"
         }
+
+    def run_rag_indexing(self, pub_id: int, content: str = None):
+        """
+        Run RAG indexing for a publication. Use as a BackgroundTask.
+        """
+        print(f"   [Background] Starting RAG indexing for publication {pub_id}...")
+        try:
+            from services.rag_service import get_semantic_engine
+            # Fetch content if not provided (though optimization suggests passing it)
+            if not content:
+                # Need a new session if running fully decoupled in background without session reuse
+                # For now assuming content is passed or we'd need to fetch from DB
+                pass 
+            
+            if content and len(content) > 100:
+                engine = get_semantic_engine()
+                rag_result = engine.process_single_publication(pub_id)
+                success = rag_result.get("success", False)
+                print(f"   [Background] RAG Indexing finished for {pub_id}: {success}")
+                return success
+        except Exception as e:
+            print(f"   [Background] ⚠️ RAG Indexing failed for {pub_id}: {e}")
+            return False
+    
+    def _upsert_metric(self, db: Session, member_id, pub_id, source, metric_type, value):
         """
         Logical Upsert: Updates value if source/type exists for the entity, else inserts.
         """

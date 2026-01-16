@@ -69,9 +69,21 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
     try:
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             for page in pdf.pages:
-                page_text = page.extract_text()
+                # layout=True uses pdfminer's layout analysis
+                # This is CRITICAL for multi-column PDFs to avoid interleaved text
+                page_text = page.extract_text(layout=True)
                 if page_text:
                     text_content.append(page_text)
+                    
+        # Fallback: If layout=True returns empty (sometimes happens with weird PDFs),
+        # try standard extraction
+        if not text_content:
+             print("   [Extraction] Layout extraction returned empty, trying standard...")
+             with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text_content.append(page_text)
         
         if text_content:
             return "\n\n".join(text_content)
@@ -121,40 +133,58 @@ def validate_pdf_file(filename: str, content: bytes) -> tuple[bool, Optional[str
 def extract_doi(text: str) -> Optional[str]:
     """
     Extract DOI from PDF text using regex pattern.
+    ONLY searches in the first ~5000 characters (header/abstract).
     
     Args:
         text: Full text content from PDF
         
     Returns:
-        DOI URL (with https://doi.org/ prefix) or None if not found
+        DOI URL (with https://doi.org/ prefix) or None if not found in header
     """
     # Normalize text: replace newlines and multiple spaces with single space
-    # This helps with PDFs where DOI might be split across lines
     normalized_text = ' '.join(text.split())
     
-    # Multiple DOI patterns to try (ordered by specificity)
+    # Normalize unicode dashes to standard hyphen
+    normalized_text = normalized_text.replace('\u2013', '-').replace('\u2014', '-')
+    
+    # Header search only
+    header_text = normalized_text[:5000]
+    
+    # Multiple DOI patterns to try (ordered by reliability)
     patterns = [
-        # Pattern 1: Explicit "DOI:" prefix (most reliable)
+        # Pattern 1: DOI in full URL format
+        # Use explicit character class [a-zA-Z0-9] instead of \w to be safer/stricter
+        r'(?:https?://)?(?:dx\.)?doi\.org/(10\.\d{4,9}/[-._;()/:a-zA-Z0-9]+)',
+        
+        # Pattern 2: Explicit "DOI:" prefix
         r'DOI\s*:?\s*(10\.\d{4,9}/[-._;()/:a-zA-Z0-9]+)',
         
-        # Pattern 2: Standard DOI pattern with word boundary
+        # Pattern 3: Standard DOI pattern with word boundary
+        # This will catch standalone DOIs like 10.4067/s0034...
+        # Added extra check to avoid capturing trailing text if spacing is bad
+        # Valid DOIs rarely end in punctuation, so we trim that later anyway.
         r'\b(10\.\d{4,9}/[-._;()/:a-zA-Z0-9]+)',
-        
-        # Pattern 3: DOI in URL format
-        r'(?:https?://)?(?:dx\.)?doi\.org/(10\.\d{4,9}/[-._;()/:a-zA-Z0-9]+)',
     ]
     
-    for pattern in patterns:
-        match = re.search(pattern, normalized_text, re.IGNORECASE)
+    for i, pattern in enumerate(patterns, 1):
+        match = re.search(pattern, header_text, re.IGNORECASE)
         if match:
             # Extract the DOI part (group 1)
             doi = match.group(1)
-            # Clean up any trailing punctuation that might have been captured
+            
+            # Clean up trailing punctuation that regex might have captured
+            # e.g. "10.1234/abc." -> "10.1234/abc"
             doi = doi.rstrip('.,;)]')
-            print(f"   [DOI Extraction] Found DOI: {doi}")
+            
+            # Sanity Check: DOI shouldn't end with a completely valid word like "Desafios"
+            # If the last part is > 4 letters and looks like a word, it might be a concat error
+            # But valid DOIs CAN have long suffixes. 
+            # Trusting regex [a-zA-Z0-9] is safer than \w which matches unicode words.
+            
+            print(f"   [DOI Extraction] Found DOI in header (pattern {i}): {doi}")
             return f"https://doi.org/{doi}"
-    
-    print("   [DOI Extraction] No DOI found in text")
+            
+    print("   [DOI Extraction] No DOI found in header (will try OpenAlex search)")
     return None
 
 
@@ -262,8 +292,9 @@ def analyze_text_with_ai(text: str, api_key: Optional[str] = None) -> Dict:
 TAREAS:
 1. Generar resumen en ESPAÑOL (max 150 palabras)
 2. Generar resumen en INGLÉS (max 150 words)
-3. EXTRAER SOLO EL NOMBRE DE LA REVISTA donde se publicó
-4. EXTRAER TÍTULO EXACTO DEL PAPER
+3. EXTRAER EL NOMBRE DE LA REVISTA donde se publicó
+4. EXTRAER EL NOMBRE DE QUIEN PUBLICO LA REVISTA
+5. EXTRAER TÍTULO EXACTO DEL PAPER
 
 IMPORTANTE: 
 - NO busques métricas (JIF, SJR, cuartiles, etc.) - eso se hará después manualmente.
@@ -276,6 +307,7 @@ FORMATO DE RESPUESTA (JSON PURO):
   "summary_en": "Summary in english...",
   "journal_analysis": {{
     "journal_name": "Nombre exacto de la Revista",
+    "journal_publisher": "Nombre exacto de quien publicó la revista",
     "reasoning": "Breve nota de dónde encontré el nombre (ej: header del PDF, metadata)"
   }}
 }}

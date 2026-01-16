@@ -124,3 +124,9 @@ wos_full_database.xlsx
 wos_full_database_v2.xlsx
 wos_sample_data_v2.xlsx
 ~$wos_full_database.xlsx
+data/publications/*.pdf
+data/publications/*.pdf
+
+# Ignorar PDFs de datos
+data/publications/*.pdf
+data/publications/*/*.pdf

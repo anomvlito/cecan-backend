@@ -46,9 +46,17 @@ class PublicPublicationOut(BaseModel):
     quartile: Optional[str] = None  # Added: Dedicated Quartile Column
     content: Optional[str] = None
     journal: Optional[dict] = None  # ✅ ADDED: Journal data with categories
+    # Temporary journal fields (NEW)
+    journal_name_temp: Optional[str] = None
+    publisher_temp: Optional[str] = None
+    # Enrichment status (NEW)
+    enrichment_status: str = "metadata_only"
+    # WOS Verification (NEW)
+    wos_verification: Optional[dict] = None
     # Legacy impact metrics
     impact_metrics: Optional[dict] = None
     authors: List[ResearcherSummarySchema] = []
+
 
 
 # --- Endpoints ---
@@ -137,77 +145,120 @@ async def get_public_publications(db: Session = Depends(get_db)):
         
         results = []
         for pub in publications:
-            authors = []
-            # Iterate over connections already loaded in memory
-            for rp in pub.researcher_connections:
-                if not rp.member: continue # Skip if data is corrupt
+            try:
+                authors = []
+                # Iterate over connections already loaded in memory
+                for rp in pub.researcher_connections:
+                    if not rp.member: continue # Skip if data is corrupt
+                    
+                    member = rp.member
+                    details = member.researcher_details
+                    
+                    authors.append({
+                        "id": member.id,
+                        "full_name": member.full_name,
+                        # Safe navigation to avoid error if details is None
+                        "avatar_url": details.url_foto if details else None
+                    })
                 
-                member = rp.member
-                details = member.researcher_details
-                
-                authors.append({
-                    "id": member.id,
-                    "full_name": member.full_name,
-                    # Safe navigation to avoid error if details is None
-                    "avatar_url": details.url_foto if details else None
-                })
-            
-            # Serialize journal if exists
-            journal_data = None
-            if pub.journal:
-                journal_data = {
-                    "id": pub.journal.id,
-                    "name": pub.journal.name,
-                    "publisher": pub.journal.publisher,
-                    "jif_current": pub.journal.jif_current,
-                    "jif_year": pub.journal.jif_year,
-                    "jif_5year": pub.journal.jif_5year,
-                    "scopus_citescore": pub.journal.scopus_citescore,
-                    "scopus_sjr": pub.journal.scopus_sjr,
-                    "scopus_snip": pub.journal.scopus_snip,
-                    "last_updated": pub.journal.last_updated,
-                    "categories": [
-                        {
-                            "category_name": cat.category_name,
-                            "source": cat.source,
-                            "quartile": cat.quartile,
-                            "percentile": cat.percentile,
-                            "ranking": cat.ranking
+                # Serialize journal if exists
+                journal_data = None
+                if pub.journal:
+                    try:
+                        journal_data = {
+                            "id": pub.journal.id,
+                            "name": pub.journal.name,
+                            "publisher": pub.journal.publisher,
+                            "jif_current": pub.journal.jif_current,
+                            "jif_year": pub.journal.jif_year,
+                            "jif_5year": pub.journal.jif_5year,
+                            "scopus_citescore": pub.journal.scopus_citescore,
+                            "scopus_sjr": pub.journal.scopus_sjr,
+                            "scopus_snip": pub.journal.scopus_snip,
+                            "last_updated": pub.journal.last_updated,
+                            "categories": [
+                                {
+                                    "category_name": cat.category_name,
+                                    "source": cat.source,
+                                    "quartile": cat.quartile,
+                                    "percentile": cat.percentile,
+                                    "ranking": cat.ranking
+                                }
+                                for cat in pub.journal.categories
+                            ] if pub.journal.categories else []
                         }
-                        for cat in pub.journal.categories
-                    ] if pub.journal.categories else []
-                }
-            
-            # 2. Use getattr to avoid crash if DB is missing new columns
-            results.append({
-                "id": pub.id,
-                "title": pub.title,
-                "year": pub.year,
-                "url": pub.url,
-                "doi": getattr(pub, "canonical_doi", None), 
-                "canonical_doi": getattr(pub, "canonical_doi", None),
-                "doi_verification_status": getattr(pub, "doi_verification_status", "pending"),
-                "has_funding_ack": getattr(pub, "has_funding_ack", False),
-                "anid_report_status": getattr(pub, "anid_report_status", "Pending"),
-                # OpenAlex metrics
-                "metrics_data": getattr(pub, "metrics_data", None),
-                "metrics_last_updated": getattr(pub, "metrics_last_updated", None),
-                # AI-generated summaries
-                "summary_es": getattr(pub, "summary_es", None),
-                "summary_en": getattr(pub, "summary_en", None),
-                "ai_journal_analysis": getattr(pub, "ai_journal_analysis", None), # Added: AI Journal Analysis
-                "quartile": getattr(pub, "quartile", None), # Added: Dedicated Quartile
-                "content": getattr(pub, "content", None),
-                "journal": journal_data,  # ✅ ADDED: Include journal data
-                # Legacy impact metrics
-                "impact_metrics": {
-                    "citation_count": pub.impact_metrics.citation_count if pub.impact_metrics else None,
-                    "is_international_collab": pub.impact_metrics.is_international_collab if pub.impact_metrics else None,
-                    "quartile": pub.impact_metrics.quartile if pub.impact_metrics else None,
-                    "jif": pub.impact_metrics.jif if pub.impact_metrics else None,
-                } if pub.impact_metrics else None,
-                "authors": authors
-            })
+                    except Exception as e:
+                        logger.warning(f"Error serializing journal for publication {pub.id}: {e}")
+                        journal_data = None
+                
+                # Safe access to impact metrics
+                impact_metrics_data = None
+                if hasattr(pub, 'impact_metrics') and pub.impact_metrics:
+                    try:
+                        impact_metrics_data = {
+                            "citation_count": getattr(pub.impact_metrics, 'citation_count', None),
+                            "is_international_collab": getattr(pub.impact_metrics, 'is_international_collab', None),
+                            "quartile": getattr(pub.impact_metrics, 'quartile', None),
+                            "jif": getattr(pub.impact_metrics, 'jif', None),
+                            "ranking_percentile": getattr(pub.impact_metrics, 'ranking_percentile', None),
+                        }
+                    except Exception as e:
+                        logger.warning(f"Error serializing impact_metrics for publication {pub.id}: {e}")
+                
+                # Safe access to WOS verification
+                wos_data = None
+                if hasattr(pub, 'wos_verification') and pub.wos_verification:
+                    try:
+                        wos_data = {
+                            "match_type": getattr(pub.wos_verification, 'match_type', None),
+                            "quartile": getattr(pub.wos_verification, 'quartile', None),
+                            "decile": getattr(pub.wos_verification, 'decile', None),
+                            "is_top_10": getattr(pub.wos_verification, 'is_top_10', False),
+                            "source_url": getattr(pub.wos_verification, 'source_url', None),
+                            "categories": getattr(pub.wos_verification, 'categories', []),
+                            "journal_name": getattr(pub.wos_verification, 'journal_name', None)
+                        }
+                    except Exception as e:
+                        logger.warning(f"Error serializing wos_verification for publication {pub.id}: {e}")
+                
+                # Build publication response
+                results.append({
+                    "id": pub.id,
+                    "title": pub.title,
+                    "year": pub.year,
+                    "url": pub.url,
+                    "doi": getattr(pub, "canonical_doi", None), 
+                    "canonical_doi": getattr(pub, "canonical_doi", None),
+                    "doi_verification_status": getattr(pub, "doi_verification_status", "pending"),
+                    "has_funding_ack": getattr(pub, "has_funding_ack", False),
+                    "anid_report_status": getattr(pub, "anid_report_status", "Pending"),
+                    # OpenAlex metrics
+                    "metrics_data": getattr(pub, "metrics_data", None),
+                    "metrics_last_updated": getattr(pub, "metrics_last_updated", None),
+                    # AI-generated summaries
+                    "summary_es": getattr(pub, "summary_es", None),
+                    "summary_en": getattr(pub, "summary_en", None),
+                    "ai_journal_analysis": getattr(pub, "ai_journal_analysis", None),
+                    "quartile": getattr(pub, "quartile", None),
+                    "content": getattr(pub, "content", None),
+                    "journal": journal_data,
+                    # Temporary journal fields
+                    "journal_name_temp": getattr(pub, "journal_name_temp", None),
+                    "publisher_temp": getattr(pub, "publisher_temp", None),
+                    # Enrichment status
+                    "enrichment_status": getattr(pub, "enrichment_status", "metadata_only"),
+                    # WOS Verification
+                    "wos_verification": wos_data,
+                    # Legacy impact metrics
+                    "impact_metrics": impact_metrics_data,
+                    "authors": authors
+                })
+                
+            except Exception as e:
+                # Log error but continue processing other publications
+                logger.error(f"Error processing publication {pub.id}: {str(e)}", exc_info=True)
+                # Optionally include a minimal entry or skip entirely
+                continue
             
         return results
         
@@ -215,7 +266,6 @@ async def get_public_publications(db: Session = Depends(get_db)):
         # Log real error to server console
         logger.error(f"CRITICAL ERROR in /public/publications: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching publications: {str(e)}")
 
 
 @router.get("/graph")

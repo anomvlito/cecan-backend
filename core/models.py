@@ -328,8 +328,14 @@ class PublicationImpact(Base):
     
     citation_count = Column(Integer, default=0)
     quartile = Column(String(10), nullable=True) # Q1, Q2, etc.
+    ranking_percentile = Column(Float, nullable=True)  # e.g., 81.4 (from WOS Mirror)
     jif = Column(Float, nullable=True) # Journal Impact Factor
     is_international_collab = Column(Boolean, default=False)
+    
+    # WOS Mirror Integration
+    source = Column(String(50), nullable=True)  # 'wos_mirror', 'openalex', 'manual'
+    match_confidence = Column(String(50), nullable=True)  # 'exact_issn', 'exact_name_verified', etc.
+    wos_journal_id = Column(Integer, nullable=True)  # FK to wos_journal_mirror
     
     publication = relationship("Publication", back_populates="impact_metrics")
 
@@ -565,7 +571,7 @@ class WosJournalMirror(Base):
     five_year_jif = Column(String(20))            # 5-Year Impact Factor
     issn = Column(String(20), index=True)
     eissn = Column(String(20), index=True)
-    categories = Column(Text)                     # Lista separada por pipe
+    categories = Column(JSON)                     # Array JSON de categorías parseadas
     ranking_category = Column(Text)               # Categoría del mejor ranking
     publisher = Column(Text)
     country = Column(String(100))

@@ -377,6 +377,39 @@ def fetch_journal_metrics(source_id: str) -> Dict:
         return {}
 
 
+def get_source_details(source_id: str) -> Dict:
+    """
+    Fetch full source details including Publisher (host_organization_name).
+    Crucial for disambiguating journals with the same name.
+    
+    Args:
+        source_id: OpenAlex Source ID (e.g., "S123456789")
+        
+    Returns:
+        Dictionary with publisher, issn, and display_name
+    """
+    clean_id = source_id.split('/')[-1]
+    url = f"https://api.openalex.org/sources/{clean_id}"
+    
+    headers = {"User-Agent": f"mailto:{OPENALEX_CONTACT_EMAIL}"}
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            return {
+                "id": data.get("id"),
+                "display_name": data.get("display_name"),
+                "publisher": data.get("host_organization_name"),  # The "Killer Feature" we need
+                "issn": data.get("issn_l"),
+                "type": data.get("type")
+            }
+    except Exception as e:
+        print(f"   [OpenAlex] ⚠️ Error fetching source details: {e}")
+    
+    return None
+
+
 def detect_international_collab(openalex_data: Dict) -> bool:
     """
     Detect if publication has international collaboration.
