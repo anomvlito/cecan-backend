@@ -11,9 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config import APP_TITLE, APP_VERSION, APP_DESCRIPTION, CORS_ORIGINS
 from api.routes import (
-    auth, compliance, publications, researchers, rag, dashboard, 
+    auth, compliance, publications, researchers, rag, dashboard,
     members, files, reports, public, catalogs, external, students,
-    enrichment  # ← NUEVO
+    enrichment, system, analytics
 )
 
 # Create FastAPI application
@@ -47,6 +47,8 @@ app.include_router(public.router, prefix="/api")
 app.include_router(catalogs.router, prefix="/api")
 app.include_router(external.router, prefix="/api/external")
 app.include_router(students.router, prefix="/api")
+app.include_router(system.router, prefix="/api/system")
+app.include_router(analytics.router, prefix="/api")
 
 # Static files and frontend
 # Mount this LAST to avoid overriding API routes

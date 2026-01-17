@@ -1,168 +1,54 @@
 """
-External Metrics Routes - Atomic endpoints for testing external API integrations
+DOI Management Routes - Listing, Extraction, Auditing and Repair
 """
 
-from fastapi import APIRouter, HTTPException, Query, Depends, Body
+from fastapi import APIRouter, HTTPException, Query, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
-from typing import Dict, Any, List
+from typing import Dict, Any
 import os
 from datetime import datetime
 
 from services.scraper_service import get_openalex_metrics, get_semantic_scholar_metrics
 from services.openalex_service import extract_publication_metadata
 from database.session import get_db
-from core.models import Publication, WosJournalMirror
+from core.models import Publication
 
 router = APIRouter(tags=["External Metrics"])
 
 
-@router.get("/wos-mirror/search")
-async def search_wos_mirror(
-    query: str = Query(..., min_length=2, description="Journal Name or ISSN"),
-    db: Session = Depends(get_db)
-) -> List[Dict[str, Any]]:
-    """
-    Search the local WOS Mirror database for journals.
-    Reads from the wos_journal_mirror table populated by the scraper.
-    """
-    q = query.strip()
-    
-    # Search logic: Exact match for ISSN, Fuzzy for Name
-    # We use ILIKE for case-insensitive search
-    
-    # Detect if query looks like ISSN (digit-digit)
-    is_mostly_digits =  sum(c.isdigit() for c in q) > 3
-    
-    base_query = db.query(WosJournalMirror)
-    
-    if is_mostly_digits:
-         results = base_query.filter(
-            or_(
-                WosJournalMirror.issn.ilike(f"%{q}%"),
-                WosJournalMirror.eissn.ilike(f"%{q}%")
-            )
-        ).limit(20).all()
-    else:
-        results = base_query.filter(
-            WosJournalMirror.journal_name.ilike(f"%{q}%")
-        ).limit(20).all()
-        
-    return [
-        {
-            "id": r.wos_id,
-            "journal_name": r.journal_name,
-            "issn": r.issn,
-            "eissn": r.eissn,
-            "best_quartile": r.best_quartile,
-            "best_ranking_percent": r.best_ranking_percent,
-            "jif": r.jif,
-            "jif_5year": r.five_year_jif,
-            "categories": r.categories,
-            "ranking_category": r.ranking_category, # Added logic to expose this field
-            "publisher": r.publisher,
-            "source_url": r.source_url
-        }
-        for r in results
-    ]
-
-
-
-@router.post("/openalex/search-journals")
-async def search_openalex_journals(
-    payload: Dict[str, str] = Body(..., example={"title": "Nature"})
-) -> List[Dict[str, Any]]:
-    """
-    Search for JOURNALS (Sources) in OpenAlex.
-    Useful for cross-validation with WOS Mirror.
-    """
-    import requests
-    query = payload.get("title", "").strip()
-    if not query:
-        return []
-        
-    url = "https://api.openalex.org/sources"
-    params = {
-        "search": query,
-        "filter": "type:journal", # Fixed: was bg_filter
-        "per_page": 10,
-        "mailto": "admin@cecan.cl"
-    }
-    
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        if r.status_code != 200:
-            print(f"OpenAlex Error: {r.status_code}")
-            return []
-            
-        data = r.json()
-        results = []
-        
-        for item in data.get("results", []):
-            # Extract relevant metrics
-            metrics = item.get("summary_stats", {})
-            
-            # Extract ISSNs
-            issn_l = item.get("issn_l")
-            issns = item.get("issn", [])
-            
-            # Map to our standard format
-            journal = {
-                "id": item.get("id"),
-                "journal_name": item.get("display_name"),
-                "publisher": item.get("host_organization_name"),
-                "issn": issn_l,
-                "eissn": issns[0] if issns else None,
-                "country": item.get("country_code"),
-                "impact_factor_2yr": metrics.get("2yr_mean_citedness"),
-                "h_index": metrics.get("h_index"),
-                "works_count": item.get("works_count"),
-                "cited_by_count": item.get("cited_by_count"),
-                "homepage_url": item.get("homepage_url"),
-                "source": "openalex"
-            }
-            results.append(journal)
-            
-        return results
-        
-    except Exception as e:
-        print(f"OpenAlex Exception: {e}")
-        return []
-
-
 @router.get("/publication-metrics")
-
 async def get_publication_metrics_by_doi(
     doi: str = Query(..., description="DOI of the publication (e.g., 10.1038/s41586-020-2649-2)")
 ) -> Dict[str, Any]:
     """
     Fetches citation metrics for a single publication using its DOI.
-    
+
     This is an atomic endpoint for testing external API connections.
     It queries OpenAlex and Semantic Scholar in real-time and returns
     the results without storing anything in the database.
-    
+
     Args:
         doi: Digital Object Identifier of the publication
-        
+
     Returns:
         JSON with metrics from both sources
-        
+
     Example:
         GET /external/publication-metrics?doi=10.1038/s41586-020-2649-2
     """
     if not doi:
         raise HTTPException(status_code=400, detail="DOI parameter is required")
-    
+
     # Clean DOI if it comes with full URL
     clean_doi = doi.split('doi.org/')[-1] if 'doi.org/' in doi else doi
-    
+
     # Query OpenAlex
     openalex_data = get_openalex_metrics(doi=clean_doi)
-    
+
     # Query Semantic Scholar
     semantic_scholar_data = get_semantic_scholar_metrics(clean_doi)
-    
+
     # Build response
     return {
         "doi": clean_doi,
@@ -178,13 +64,13 @@ async def list_existing_dois(
 ) -> Dict[str, Any]:
     """
     Lists all valid DOIs currently stored in the database.
-    
+
     Filters out:
     - URLs from cecan.cl (not DOIs)
     - Null/empty values
-    
+
     Returns only publications where url_origen contains a valid DOI pattern.
-    
+
     Example:
         GET /external/list-dois?limit=20
     """
@@ -193,25 +79,25 @@ async def list_existing_dois(
              .filter(Publication.url_origen.isnot(None))\
              .limit(limit)\
              .all()
-    
+
     # Filter and clean DOIs
     valid_dois = []
     for pub_id, titulo, url in pubs:
         # Skip cecan.cl URLs
         if 'cecan.cl' in url:
             continue
-        
+
         # Check if it's a valid DOI pattern (starts with 10. or contains doi.org)
         if url.startswith('10.') or 'doi.org/' in url:
             # Clean DOI
             clean_doi = url.split('doi.org/')[-1] if 'doi.org/' in url else url
-            
+
             valid_dois.append({
                 "publication_id": pub_id,
                 "title": titulo[:80] + "..." if len(titulo) > 80 else titulo,
                 "doi": clean_doi
             })
-    
+
     return {
         "total": len(valid_dois),
         "dois": valid_dois
@@ -226,25 +112,25 @@ async def extract_dois_from_existing_pdfs(
 ) -> Dict[str, Any]:
     """
     Retroactively extracts DOIs from publications that have PDFs stored but no DOI recorded.
-    
+
     This endpoint:
     1. Finds publications with path_pdf_local but no valid DOI
     2. Reads the PDF and extracts the DOI using regex patterns
     3. Updates the database with the found DOI (unless dry_run=true)
-    
+
     Args:
         limit: Maximum number of publications to process
         dry_run: If true, only simulates the extraction without DB updates
-        
+
     Returns:
         Summary of processed publications and extraction results
-        
+
     Example:
         POST /external/extract-missing-dois?limit=5&dry_run=true
     """
     import re
     from pypdf import PdfReader
-    
+
     # Find publications without DOI but with PDF
     candidates = db.query(Publication).filter(
         Publication.path_pdf_local.isnot(None),
@@ -253,21 +139,21 @@ async def extract_dois_from_existing_pdfs(
             Publication.url_origen.like('%cecan.cl%')
         )
     ).limit(limit).all()
-    
+
     results = {
         "processed": 0,
         "dois_extracted": 0,
         "failed": 0,
         "details": []
     }
-    
+
     # DOI regex pattern (basic)
     doi_pattern = re.compile(r'10\.\d{4,}/[^\s]+')
-    
+
     for pub in candidates:
         results["processed"] += 1
         detail = {"pub_id": pub.id, "title": pub.titulo[:50], "status": "unknown"}
-        
+
         try:
             # Check if PDF exists
             if not os.path.exists(pub.path_pdf_local):
@@ -275,24 +161,24 @@ async def extract_dois_from_existing_pdfs(
                 results["failed"] += 1
                 results["details"].append(detail)
                 continue
-            
+
             # Read PDF
             reader = PdfReader(pub.path_pdf_local)
             text = ""
             # Extract text from first 3 pages (DOI usually on first page)
             for page in reader.pages[:3]:
                 text += page.extract_text()
-            
+
             # Search for DOI
             doi_matches = doi_pattern.findall(text)
-            
+
             if doi_matches:
                 # Take the first match
                 extracted_doi = doi_matches[0].strip()
                 detail["status"] = "success"
                 detail["doi"] = extracted_doi
                 results["dois_extracted"] += 1
-                
+
                 # Update database if not dry run
                 if not dry_run:
                     pub.url_origen = f"https://doi.org/{extracted_doi}"
@@ -303,14 +189,14 @@ async def extract_dois_from_existing_pdfs(
             else:
                 detail["status"] = "no_doi_found"
                 results["failed"] += 1
-                
+
         except Exception as e:
             detail["status"] = "error"
             detail["error"] = str(e)
             results["failed"] += 1
-        
+
         results["details"].append(detail)
-    
+
     return results
 
 @router.post("/audit-dois")
@@ -321,26 +207,25 @@ async def audit_doi_links(
 ) -> Dict[str, Any]:
     """
     Audits the validity of stored DOI links.
-    
+
     Strategies:
     - 'openalex': Only checks if DOI exists in OpenAlex (No false 403s, fast).
     - 'http': Only checks HTTP connectivity (prone to 403 blocks).
     - 'hybrid' (Default): Checks OpenAlex first. If not found, falls back to HTTP.
-    
+
     Args:
         limit: Max number of publications to check
         strategy: Audit strategy
-        
+
     Returns:
         Report with valid vs broken links status
     """
     import requests
     import concurrent.futures
-    import time
-    
+
     # Get publications with DOIs
     pubs = db.query(Publication).filter(Publication.canonical_doi.isnot(None)).limit(limit).all()
-    
+
     results = {
         "total_checked": 0,
         "valid": 0,
@@ -348,7 +233,7 @@ async def audit_doi_links(
         "source_breakdown": {"openalex": 0, "http": 0},
         "details": []
     }
-    
+
     # Enhanced Headers to avoid 403
     http_headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -356,7 +241,7 @@ async def audit_doi_links(
         'Accept-Language': 'en-US,en;q=0.9',
         'Refereer': 'https://scholar.google.com/'
     }
-    
+
     def check_openalex(clean_doi):
         """Check against OpenAlex API."""
         try:
@@ -382,7 +267,7 @@ async def audit_doi_links(
                 response = session.get(url, headers=http_headers, timeout=10, stream=True, allow_redirects=True)
                 status = response.status_code
                 is_valid = 200 <= status < 400
-                # Treat 403 as "Unknown/Blocked" rather than Broken if we are unsure, 
+                # Treat 403 as "Unknown/Blocked" rather than Broken if we are unsure,
                 # but technically user calls it broken. We'll label it.
                 if status == 403:
                     return False, "blocked_403", response.url
@@ -393,12 +278,12 @@ async def audit_doi_links(
     def audit_single(pub_id, title, doi):
         # Clean DOI just in case
         clean_doi = doi.split('doi.org/')[-1].strip()
-        
+
         status = "unknown"
         source = "none"
         final_url = None
         is_valid = False
-        
+
         # 1. OpenAlex Check
         if strategy in ["openalex", "hybrid"]:
             oa_valid, oa_status, oa_metadata = check_openalex(clean_doi)
@@ -428,7 +313,7 @@ async def audit_doi_links(
         # 2. HTTP Check (Fallback or Primary)
         http_valid, http_reason, url = check_http(clean_doi)
         final_url = url
-        
+
         if http_valid:
             return {
                 "pub_id": pub_id,
@@ -451,7 +336,7 @@ async def audit_doi_links(
                     "source": "http",
                     "final_url": final_url
                 }
-            
+
             return {
                 "pub_id": pub_id,
                 "title": title[:50],
@@ -465,23 +350,23 @@ async def audit_doi_links(
     # Execute efficiently in parallel
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         futures = {executor.submit(audit_single, p.id, p.titulo, p.canonical_doi): p for p in pubs}
-        
+
         for future in concurrent.futures.as_completed(futures):
             res = future.result()
             results["total_checked"] += 1
             results["details"].append(res)
-            
+
             # Update DB with status if it's definitive
             # We do this one by one or batch? Ideally batch but let's do it safely here
             # Since 'futures' dict has the 'pub' object, we can use it
             pub_obj = futures[future]
-            
+
             if res["status"] == "valid":
                 results["valid"] += 1
                 if "openalex" in res.get("source", ""):
                     pub_obj.doi_verification_status = "valid_openalex"
                     results["source_breakdown"]["openalex"] += 1
-                    
+
                     # Phase 2: Save Enriched Metrics
                     if res.get("metadata"):
                         pub_obj.metrics_data = res["metadata"]
@@ -496,16 +381,16 @@ async def audit_doi_links(
                  # Treat as valid for now in DB but maybe a distinct status?
                  # Let's call it "valid_http" to avoid scaring users, or "warning"
                  pub_obj.doi_verification_status = "valid_http" # Assume valid if blocked
-            
+
             # Flush changes periodically or at end?
             # Doing add/commit inside loop might be slow but safe for concurrency if session is thread-local
             # But here session is shared. Ideally we collect and bulk update.
             # For simplicity:
             db.add(pub_obj)
-            
+
     db.commit()
-    
-    
+
+
     return results
 
 @router.post("/repair-dois")
@@ -515,7 +400,7 @@ async def repair_bad_dois(
 ) -> Dict[str, Any]:
     """
     Smart DOI Repair using Deep PDF Scan and OpenAlex Validation.
-    
+
     1. Identifies "Bad" DOIs (too short, placeholders like 'xxxxx', '10.1371/j').
     2. Scans the FULL PDF (up to 20 pages) for better DOI candidates.
     3. Validates candidates against OpenAlex API.
@@ -545,53 +430,53 @@ async def repair_bad_dois(
         t1 = title1.lower()
         t2 = title2.lower()
         ratio = SequenceMatcher(None, t1, t2).ratio()
-        
+
         # Also check token overlap for better accuracy
         tokens1 = set(t1.split())
         tokens2 = set(t2.split())
         if not tokens1 or not tokens2: return False
         overlap = len(tokens1.intersection(tokens2)) / min(len(tokens1), len(tokens2))
-        
+
         return ratio > threshold or overlap > 0.5
-    
+
     # 1. Regex for DOI Detection (Robust)
     # Allows for newlines/hyphens inside the suffix
     # Captures: 10.xxxx / [suffix]
     doi_pattern_robust = re.compile(r'(10\.\d{4,9}/[-._;()/:a-zA-Z0-9\s]+)')
-    
+
     # 2. Find Candidates (Bad DOIs)
     # We define "Bad" as:
     # - Shorter than 12 chars (e.g. 10.123/x) -> unlikely to be real mostly
     # - Contains 'xxxxx' or placeholder text
     # - Ends with '/j' (common truncation error we saw)
-    
+
     all_pubs = db.query(Publication).filter(Publication.canonical_doi.isnot(None)).all()
     candidates = []
-    
+
     for p in all_pubs:
         d = p.canonical_doi.strip().lower()
         is_suspicious = False
-        
+
         # 2.1 Explicit Trash Patterns
         trash_markers = ["xxxxx", "doi", "10.000", "insert", "placeholder"]
         if any(marker in d for marker in trash_markers):
              is_suspicious = True
-        
+
         # 2.2 Truncation Patterns
         if d.endswith("/j") or len(d) < 14: # 10.1371/j is 11 chars
              is_suspicious = True
-        
+
         # SAFETY CHECK: If it looks suspicious but is actually valid in OpenAlex, skip it!
         if is_suspicious:
              exists, _ = check_openalex(d)
              if exists:
                  is_suspicious = False # False alarm, it's a valid short DOI
-             
+
         if is_suspicious and p.path_pdf_local and os.path.exists(p.path_pdf_local):
             candidates.append(p)
             if len(candidates) >= limit:
                 break
-    
+
     results = {
         "analyzed": 0,
         "repaired": 0,
@@ -606,7 +491,7 @@ async def repair_bad_dois(
             "old_doi": pub.canonical_doi,
             "status": "scaling_pdf"
         }
-        
+
         try:
             # 3. Deep PDF Scan
             reader = PdfReader(pub.path_pdf_local)
@@ -615,21 +500,21 @@ async def repair_bad_dois(
             for i, page in enumerate(reader.pages):
                 if i > 20: break
                 text += page.extract_text() + "\n"
-            
+
             # Clean text lightly
             text = text.replace("- \n", "").replace("-\n", "") # Fix hyphenation
-            
+
             matches = doi_pattern_robust.findall(text)
-            
+
             # Filter and Clean Candidates
             valid_new_doi = None
-            
+
             for m in matches:
                 # Clean whitespace
                 clean = re.sub(r'\s+', '', m).strip()
                 # Remove trailing punctuation often captured
                 clean = clean.rstrip(".,;:/")
-                
+
                 # Check it's not the same garbage
                 if clean == pub.canonical_doi:
                     continue
@@ -637,7 +522,7 @@ async def repair_bad_dois(
                 # Basic validation
                 if len(clean) < 15:
                     continue
-                
+
                 # Verify with OpenAlex AND Check Title
                 exists, oa_title = check_openalex(clean)
                 if exists:
@@ -647,308 +532,25 @@ async def repair_bad_dois(
                     else:
                         # DOI exists but titles don't match (likely a reference)
                         continue
-            
+
             if valid_new_doi:
                 pub.canonical_doi = valid_new_doi
                 pub.url_origen = f"https://doi.org/{valid_new_doi}"
                 pub.doi_verification_status = "repaired"
                 db.commit()
-                
+
                 detail["status"] = "repaired"
                 detail["new_doi"] = valid_new_doi
                 results["repaired"] += 1
             else:
                 detail["status"] = "no_better_doi_found"
                 results["failed"] += 1
-                
+
         except Exception as e:
             detail["status"] = "error"
             detail["error"] = str(e)[:100]
             results["failed"] += 1
-            
+
         results["details"].append(detail)
-        
 
-# --- AI JOURNAL ANALYSIS (STATELESS) ---
-
-JOURNAL_METRICS_PROMPT_TEMPLATE = """Actúa como un experto en bibliometría.
-⚠️ INSTRUCCIÓN CRÍTICA: DEBES USAR LA HERRAMIENTA DE BÚSQUEDA DE GOOGLE (Google Search).
-NO uses tu conocimiento interno pre-entrenado. Busca en internet los datos AHORA MISMO.
-
-Objetivo: Buscar el JIF (Impact Factor) y Cuartiles más recientes (2024 o 202) para:
-Revista: {journal_name}
-Editorial: {publisher}
-
-Reporte requerido (JSON):
-1. **JIF más reciente**: Busca explícitamente "Journal Impact Factor {journal_name} 2024" o "2025".
-   - Si encuentras el JIF Released en Junio 2024 (que corresponde a datos 2023), úsalo pero acláralo.
-   - Si encuentras JIF 2024 real (publicado en 2025), mejor.
-2. **Categorías**: Las 5 principales. Prioriza WOS (JCR). Si no, Scopus (SJR).
-
-NO INVENTES DATOS. Si no encuentras el dato exacto 2024, di "N/A".
-
---- FORMATO JSON EXACTO ---
-{{
-  "jif_current": 2.6,
-  "jif_year": 2023,
-  "jif_5year": 3.2,
-  "scopus_sjr": 0.803,
-  "scopus_snip": 1.065,
-  "categories": [
-    {{
-      "category_name": "Multidisciplinary Sciences",
-      "quartile": "Q1",
-      "percentile": 67.4,
-      "ranking": "48/134",
-      "source": "WOS"
-    }}
-  ],
-  "reasoning": "Busqué en Google y encontré el JCR 2023 released en Junio 2024 en [fuente]."
-}}
-"""
-
-@router.post("/analyze-journal-ai")
-async def analyze_journal_ai(
-    payload: Dict[str, str] = Body(..., examples=[{"journal_name": "Nature", "publisher": "Springer"}])
-) -> Dict[str, Any]:
-    """
-    Stateless endpoint to analyze a journal using Gemini with Google Search Grounding.
-    Does not require the journal to exist in the database.
-    """
-    import google.generativeai as genai
-    from google.generativeai import types
-    import json
-    
-    journal_name = payload.get("journal_name", "Unknown")
-    publisher = payload.get("publisher", "Unknown")
-    
-    api_key = os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="Google API Key not configured")
-
-    # Usamos gemini-1.5-flash para balancear velocidad/costo (Free Tier incluye 1500 queries/dia)
-    model_name = os.environ.get("GEMINI_MODEL_NAME", "gemini-1.5-flash")
-
-    prompt = JOURNAL_METRICS_PROMPT_TEMPLATE.format(
-        journal_name=journal_name,
-        publisher=publisher
-    )
-
-    try:
-        # INTENTO 1: Con GROUNDING (Calidad Premium "Google Search")
-        # Sintaxis validada: {'google_search': {}}
-        tools = [{'google_search': {}}]
-        
-        model_grounded = genai.GenerativeModel(
-            model_name=model_name,
-            tools=tools
-        )
-        
-        # print(f"🤖 [AI-Ext] Intentando con Grounding...")
-        
-        response = model_grounded.generate_content(
-            prompt,
-            generation_config=types.GenerationConfig(
-                temperature=0.1,
-                max_output_tokens=2048,
-                response_mime_type="application/json"
-            )
-        )
-        
-    except Exception as e_grounding:
-        # FALLBACK: Si falla el Grounding (API Error 400, Cuota, etc), usar modelo base
-        print(f"⚠️ [AI-Ext] Falló Grounding ({e_grounding}). Usando Fallback sin búsqueda.")
-        
-        model_fallback = genai.GenerativeModel(model_name=model_name) # Sin tools
-        
-        response = model_fallback.generate_content(
-            prompt, # Reusamos el mismo prompt
-            generation_config=types.GenerationConfig(
-                temperature=0.1, # Un poco más creativo para compensar falta de datos
-                max_output_tokens=2048,
-                response_mime_type="application/json"
-            )
-        )
-    
-    # Procesamiento común de la respuesta (sea Grounded o Fallback)
-    try:
-        result_text = response.text
-        
-        # Clean markdown
-        if "```json" in result_text:
-            result_text = result_text.split("```json")[1].split("```")[0].strip()
-        elif "```" in result_text:
-            result_text = result_text.split("```")[0].strip()
-            
-        data = json.loads(result_text)
-        
-        # Agregar metadata de grounding si existe (Solo vendrá del Intento 1)
-        grounding_urls = []
-        if hasattr(response, 'grounding_metadata') and response.grounding_metadata:
-             for chunk in response.grounding_metadata.grounding_chunks:
-                if hasattr(chunk, 'web'):
-                    grounding_urls.append(chunk.web.uri)
-        
-        data["grounding_urls"] = grounding_urls[:5] # Top 5 fuentes
-        
-        return data
-
-    except Exception as e:
-        print(f"❌ [AI-Ext] Error procesando respuesta: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/triangulate")
-async def triangulate_journal_data(
-    payload: Dict[str, str] = Body(..., examples=[{"query": "10.1007/s10120-024-01578-3"}], description="Query can be a DOI, Title or ISSN"),
-    db: Session = Depends(get_db)
-) -> Dict[str, Any]:
-    """
-    MASTER ENDPOINT for Data Triangulation (Strict Sequential Flow).
-    
-    Flow requested by User:
-    1. OpenAlex (DOI) -> Get Journal Name & Source ID.
-    2. OpenAlex (Source ID) -> Get Exact Publisher (Imperative).
-    3. WOS Mirror -> Search by Journal Name (Local DB).
-    4. AI Analysis -> Use gathered Context.
-    """
-    import requests
-    
-    query = payload.get("query", "").strip()
-    if not query:
-        raise HTTPException(status_code=400, detail="Query is required")
-    
-    # Context Variables
-    resolved_journal_name = query
-    resolved_publisher = "Unknown"
-    source_id = None
-    is_doi = query.startswith("10.") or "doi.org" in query
-    
-    status_log = ["Start"]
-    
-    # --- STEP 1: OPENALEX DOI LOOKUP (To get Journal Name) ---
-    if is_doi:
-        clean_doi = query.split('doi.org/')[-1] if 'doi.org/' in query else query
-        try:
-            url = f"https://api.openalex.org/works/https://doi.org/{clean_doi}"
-            r = requests.get(url, params={"mailto": "admin@cecan.cl"}, timeout=10)
-            
-            if r.status_code == 200:
-                data = r.json()
-                primary_loc = data.get("primary_location", {}) or {}
-                source = primary_loc.get("source", {}) or {}
-                
-                if source.get("display_name"):
-                    resolved_journal_name = source.get("display_name")
-                    source_id = source.get("id") # OpenAlex ID (e.g., https://openalex.org/S12345)
-                    status_log.append(f"Step 1: Resolved DOI to Journal '{resolved_journal_name}' (SourceID: {source_id})")
-                else:
-                    status_log.append("Step 1: DOI found but no Journal/Source info")
-            else:
-                 status_log.append(f"Step 1: OpenAlex DOI lookup failed ({r.status_code})")
-                 
-        except Exception as e:
-            print(f"Error Step 1: {e}")
-            status_log.append(f"Step 1 Error: {str(e)}")
-            
-    # --- STEP 2: OPENALEX SOURCE LOOKUP (Imperative Publisher) ---
-    # We do this if we have a Source ID from Step 1, OR if the user provided a Journal Name directly (search needed)
-    
-    if source_id:
-        # Direct lookup by ID
-        try:
-            # source_id usually looks like "https://openalex.org/S..." or just "S..."
-            # API expects just the ID usually or full URL works too
-            s_url = f"https://api.openalex.org/sources/{source_id}"
-            r_source = requests.get(s_url, params={"mailto": "admin@cecan.cl"}, timeout=10)
-            if r_source.status_code == 200:
-                s_data = r_source.json()
-                if s_data.get("host_organization_name"):
-                    resolved_publisher = s_data.get("host_organization_name")
-                    status_log.append(f"Step 2: Resolved Publisher '{resolved_publisher}' from Source ID")
-        except Exception as e:
-             status_log.append(f"Step 2 Error (ID lookup): {e}")
-
-    elif not is_doi:
-        # If it wasn't a DOI, we need to search for the journal in OpenAlex to get the publisher
-        try:
-             # Search sources by name
-             search_url = "https://api.openalex.org/sources"
-             params = {"search": resolved_journal_name, "filter": "type:journal", "per_page": 1}
-             r_search = requests.get(search_url, params=params, timeout=10)
-             if r_search.status_code == 200:
-                 res = r_search.json().get("results", [])
-                 if res:
-                     top_match = res[0]
-                     resolved_journal_name = top_match.get("display_name", resolved_journal_name) # Refine name
-                     resolved_publisher = top_match.get("host_organization_name", "Unknown")
-                     status_log.append(f"Step 2: Searched Journal, found Publisher '{resolved_publisher}'")
-        except Exception as e:
-             status_log.append(f"Step 2 Error (Search): {e}")
-
-    # --- STEP 3: WOS MIRROR SEARCH ---
-    # Now we have the best possible Journal Name and Publisher
-    results_wos = []
-    try:
-        # We search WOS Mirror using the resolved name
-        # We search fuzzy first to get potential candidates
-        base_results = await search_wos_mirror(query=resolved_journal_name, db=db)
-        
-        # Smart Filter: If we find an EXACT match, return only that one.
-        # This satisfies the user requirement "quiero que solo muestre el resultado exacto"
-        exact_matches = [
-            r for r in base_results 
-            if r['journal_name'].lower() == resolved_journal_name.lower()
-        ]
-        
-        if exact_matches:
-            results_wos = exact_matches
-        else:
-            results_wos = base_results
-
-        status_log.append(f"Step 3: WOS Mirror returned {len(results_wos)} results")
-    except Exception as e:
-        status_log.append(f"Step 3 Error: {e}")
-
-    # --- STEP 4: AI ANALYSIS ---
-    # Only if we have something meaningful
-    result_ai = None
-    try:
-        if resolved_journal_name and resolved_journal_name != query:
-             # Meaning we resolved something
-             status_log.append("Step 4: Running AI Analysis...")
-             result_ai = await analyze_journal_ai(payload={
-                 "journal_name": resolved_journal_name,
-                 "publisher": resolved_publisher
-             })
-        elif not is_doi and resolved_journal_name:
-             # Direct search case
-             status_log.append("Step 4: Running AI Analysis (Direct)...")
-             result_ai = await analyze_journal_ai(payload={
-                 "journal_name": resolved_journal_name,
-                 "publisher": resolved_publisher
-             })
-             
-    except Exception as e:
-        status_log.append(f"Step 4 Error: {e}")
-        result_ai = {"error": str(e)}
-
-    return {
-        "status": "success",
-        "resolved_query": {
-            "original": query,
-            "is_doi": is_doi,
-            "journal_name": resolved_journal_name,
-            "publisher": resolved_publisher
-        },
-        "wos_mirror": results_wos,
-        # We don't necessarily return a list of OpenAlex sources here since we used it for resolution
-        # But for UI consistency we can wrap the found journal in a list if found
-        "openalex_sources": [{
-             "journal_name": resolved_journal_name,
-             "publisher": resolved_publisher,
-             "source": "openalex (resolved)"
-        }] if resolved_publisher != "Unknown" else [],
-        "ai_analysis": result_ai,
-        "debug_log": status_log
-    }
+    return results
