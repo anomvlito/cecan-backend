@@ -17,7 +17,7 @@ from core.models import User
 from services import scraper_service, compliance_service, publication_service
 from services.ingestion_service import ingestion_service
 from core.models import Publication, ResearcherPublication, AcademicMember, PublicationImpact, PublicationChunk, Journal
-from services.journal_service import JournalMatchingService
+from services.wos_verification_service import enrich_publication_with_wos_verification
 from schemas import PublicationUpdate, PublicationOut, PublicationDetailOut, PublicationAuthorOut, WosVerificationOut
 
 router = APIRouter(prefix="/publications", tags=["Publications"])
@@ -40,62 +40,17 @@ async def get_publications(
         .order_by(Publication.id.desc())
         .all()
     )
-    
-    # Initialize matcher
-    matcher = JournalMatchingService(db)
-    
+
     # Enrich with WOS data
     results = []
-    
-    # Optimization: Pre-fetch all IDs in a dictionary if needed, but for < 1000 items, rapidfuzz on demand is okay-ish.
-    # ideally we cache this result in the DB, but for now we calculate.
-    
+
     for pub in pubs:
         # Create Pydantic model from ORM
-        # Note: We must manually attaching the new field because it's not in the ORM model
         pub_out = PublicationOut.from_orm(pub)
-        
-        try:
-            journal_name = pub.journal.name if pub.journal else pub.journal_name_temp
-            issn = pub.journal.issn if pub.journal else None
-            publisher = pub.publisher_temp  # Added publisher extraction
-            
-            # Use 'fast' matching first (exact only) if we wanted to be super strict, 
-            # but find_best_match is already cascading. 
-            match, match_type = matcher.find_best_match(journal_name, issn, publisher=publisher)
-            
-            if match:
-                 decile = None
-                 is_top_10 = False
-                 if match.best_ranking_percent:
-                     try:
-                         percent = float(match.best_ranking_percent.replace('%', '').strip())
-                         if percent >= 90: decile = 1
-                         elif percent >= 80: decile = 2
-                         elif percent >= 70: decile = 3
-                         elif percent >= 60: decile = 4
-                         elif percent >= 50: decile = 5
-                         elif percent >= 40: decile = 6
-                         elif percent >= 30: decile = 7
-                         elif percent >= 20: decile = 8
-                         elif percent >= 10: decile = 9
-                         else: decile = 10
-                         is_top_10 = percent >= 90.0
-                     except: pass
-                
-                 pub_out.wos_verification = WosVerificationOut(
-                     match_type=match_type,
-                     quartile=match.best_quartile,
-                     decile=decile,
-                     is_top_10=is_top_10,
-                     source_url=match.source_url,
-                     categories=match.categories if match.categories else [],
-                     journal_name=match.journal_name
-                 )
-        except Exception as e:
-            # print(f"Error matching pub {pub.id}: {e}")
-            pass
-            
+
+        # Add WOS verification using extracted service
+        enrich_publication_with_wos_verification(pub_out, pub, db)
+
         results.append(pub_out)
 
     return results
@@ -129,66 +84,13 @@ async def get_publication_detail(
     
     if not pub:
         raise HTTPException(status_code=404, detail="Publication not found")
-    
+
     # Use custom from_orm to properly serialize authors
     detail = PublicationDetailOut.from_orm(pub)
-    
-    # --- WOS Verification ---
-    try:
-        matcher = JournalMatchingService(db)
-        
-        # Get identifying info
-        journal_name = pub.journal.name if pub.journal else pub.journal_name_temp
-        issn = pub.journal.issn if pub.journal else None # Assuming Journal model has ISSN
-        publisher = pub.publisher_temp # Added publisher extraction
-        
-        # Execute match
-        match, match_type = matcher.find_best_match(
-            journal_name=journal_name,
-            issn=issn,
-            publisher=publisher
-        )
-        
-        if match:
-             # Calculate Decile from best_ranking_percent (e.g. "99.7%")
-             decile = None
-             is_top_10 = False
-             
-             if match.best_ranking_percent:
-                 try:
-                     percent_str = match.best_ranking_percent.replace('%', '').strip()
-                     percent = float(percent_str)
-                     
-                     # Percentile 90+ is Top 10% (Decile 1)
-                     # Formula: Decile 1 is top, Decile 10 is bottom
-                     if percent >= 90: decile = 1
-                     elif percent >= 80: decile = 2
-                     elif percent >= 70: decile = 3
-                     elif percent >= 60: decile = 4
-                     elif percent >= 50: decile = 5
-                     elif percent >= 40: decile = 6
-                     elif percent >= 30: decile = 7
-                     elif percent >= 20: decile = 8
-                     elif percent >= 10: decile = 9
-                     else: decile = 10
-                     
-                     is_top_10 = percent >= 90.0
-                     
-                 except Exception:
-                     pass
-             
-             detail.wos_verification = WosVerificationOut(
-                 match_type=match_type,
-                 quartile=match.best_quartile,
-                 decile=decile,
-                 is_top_10=is_top_10,
-                 source_url=match.source_url,
-                 categories=match.categories if match.categories else [],
-                 journal_name=match.journal_name
-             )
-    except Exception as e:
-        print(f"Error in WOS Verification for pub {pub_id}: {e}")
-        
+
+    # Add WOS verification using extracted service
+    enrich_publication_with_wos_verification(detail, pub, db)
+
     return detail
 
 
