@@ -1,5 +1,5 @@
-from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, EmailStr, Field, validator, ConfigDict
+from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime, date
 from enum import Enum
 
@@ -208,6 +208,7 @@ class PublicationOut(BaseModel):
     year: Optional[str] = None
     url: Optional[str] = None
     canonical_doi: Optional[str] = None
+    has_doi: bool = False  # Pre-computed flag for performance
     
     # Estado de enriquecimiento (NUEVO)
     enrichment_status: str = "metadata_only"  # ← NUEVO
@@ -425,7 +426,254 @@ class StudentOut(StudentBase):
     created_at: Optional[datetime]
     updated_at: Optional[datetime]
     theses: List[ThesisOut] = []
-    
+
+    class Config:
+        from_attributes = True
+
+
+# ===========================
+# AUTHOR INFERENCE
+# ===========================
+
+class AuthorInferenceRequest(BaseModel):
+    """Request schema for author inference endpoint."""
+    mode: Literal["single", "batch"] = "single"
+    publication_id: Optional[int] = None      # Required if mode=single
+    publication_ids: Optional[List[int]] = None  # Required if mode=batch
+    auto_link: bool = True                     # Auto-connect if score >= threshold
+    threshold: float = 0.7                     # Confidence threshold (0.0-1.0)
+
+    @validator('threshold')
+    def validate_threshold(cls, v):
+        if not (0.0 <= v <= 1.0):
+            raise ValueError('threshold must be between 0.0 and 1.0')
+        return v
+
+
+class AuthorMatchCandidate(BaseModel):
+    """A single author match candidate."""
+    external_author: str
+    matched_member: Optional[Dict[str, Any]] = None
+    score: float
+    source: str  # "openalex" | "semanticscholar"
+    position: int = 0
+    auto_linked: bool = False
+    skipped_reason: Optional[str] = None
+
+
+class AuthorInferenceResult(BaseModel):
+    """Result of inferring authors for a single publication."""
+    publication_id: int
+    doi: Optional[str]
+    sources_consulted: List[str]
+    external_authors: List[str]
+    candidates: List[AuthorMatchCandidate]
+    stats: Dict[str, int]
+    error: Optional[str] = None
+
+
+class AuthorInferenceResponse(BaseModel):
+    """Response for author inference endpoint."""
+    status: Literal["success", "partial", "error"]
+    message: str
+    results: List[AuthorInferenceResult]
+
+
+class BatchLinkAuthorsRequest(BaseModel):
+    """Request schema for batch linking authors."""
+    links: List[Dict[str, int]]  # List of {"publication_id": X, "researcher_id": Y}
+
+
+class BatchLinkAuthorsResponse(BaseModel):
+    """Response for batch linking authors."""
+    status: str
+    created: int
+    skipped: int
+    errors: List[str] = []
+
+
+# Research Map Schemas
+class ResearchMapPointResponse(BaseModel):
+    id: int
+    publication_id: int
+    x: float
+    y: float
+    z: float
+    cluster_id: int
+    cluster_label: str
+
+    # Publication info
+    title: str
+    authors: Optional[str]
+    year: Optional[int]
+    doi: Optional[str]
+    summary: Optional[str]
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ResearchMapSnapshotResponse(BaseModel):
+    id: int
+    created_at: datetime
+    parameters: dict
+    total_publications: int
+    points: List[ResearchMapPointResponse]
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ResearchMapGenerateRequest(BaseModel):
+    n_neighbors: int = 15
+    min_dist: float = 0.1
+    n_clusters: int = 5
+    metric: str = "cosine"
+
+
+# ===========================
+# AUTHORIZATION & RACI SCHEMAS
+# ===========================
+
+class RaciRoleEnum(str, Enum):
+    """RACI responsibility roles."""
+    R = "R"  # Responsible - Does the work
+    A = "A"  # Accountable - Ultimately answerable
+    C = "C"  # Consulted - Provides input
+    I = "I"  # Informed - Kept in the loop
+
+
+class ResourceTypeEnum(str, Enum):
+    """Types of resources that can have responsibility assignments."""
+    SCIENTIFIC_PROJECT = "scientific_project"
+    PROJECT_ACTIVITY = "project_activity"
+    PUBLICATION = "publication"
+    WORK_PACKAGE = "work_package"
+
+
+class ResponsibilityCreate(BaseModel):
+    """Schema for creating a responsibility assignment."""
+    resource_type: ResourceTypeEnum
+    resource_id: int
+    raci_role: RaciRoleEnum
+    member_id: int
+    user_id: Optional[int] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ResponsibilityUpdate(BaseModel):
+    """Schema for updating a responsibility assignment."""
+    raci_role: Optional[RaciRoleEnum] = None
+    member_id: Optional[int] = None
+    user_id: Optional[int] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ResponsibilityRead(BaseModel):
+    """Schema for reading a responsibility assignment."""
+    id: int
+    resource_type: ResourceTypeEnum
+    resource_id: int
+    raci_role: RaciRoleEnum
+    member_id: int
+    user_id: Optional[int] = None
+    created_at: Optional[datetime] = None
+    created_by: Optional[int] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ResponsibilityWithMember(ResponsibilityRead):
+    """Schema for reading a responsibility with member details."""
+    member: Optional[AcademicMemberOut] = None
+
+    class Config:
+        from_attributes = True
+
+
+class MyResponsibilityItem(BaseModel):
+    """
+    Schema for dashboard view of user's RACI responsibilities.
+    Enriched with resource details for display.
+    """
+    # Assignment metadata
+    assignment_id: int
+    resource_type: ResourceTypeEnum
+    resource_id: int
+    raci_role: RaciRoleEnum
+
+    # Resource details
+    title: str  # Activity description or Project title
+    project_name: Optional[str] = None  # Parent project name (for activities)
+    project_code: Optional[str] = None  # Project code (e.g., "P-08")
+
+    # Status and timeline
+    status: Optional[str] = None  # Activity or Project status
+    deadline: Optional[datetime] = None  # end_month for activities, end_date for projects
+    is_overdue: bool = False
+
+    # Additional context
+    progress: Optional[float] = None  # 0.0 to 1.0
+    budget_allocated: Optional[float] = None
+
+    class Config:
+        from_attributes = True
+
+
+class UserRoleEnum(str, Enum):
+    """Extended user role enumeration for RBAC."""
+    SUPER_ADMIN = "super_admin"
+    ADMIN = "admin"
+    STAFF = "staff"
+    PI = "pi"
+    RESEARCHER = "researcher"
+    STUDENT = "student"
+    EDITOR = "editor"
+    VIEWER = "viewer"
+
+
+# ===========================
+# USER IDENTITY & CONTEXT
+# ===========================
+
+class UserBasicInfo(BaseModel):
+    """Basic user account information."""
+    id: int
+    email: str
+    role: str
+    full_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class AcademicMemberContext(BaseModel):
+    """Academic member context for current user."""
+    id: int
+    full_name: str
+    member_type: str
+    category: Optional[str] = None  # For researchers: Principal/Asociado/Adjunto
+    wps: List[WorkPackageSchema] = []
+
+    class Config:
+        from_attributes = True
+
+
+class UserMeResponse(BaseModel):
+    """
+    Complete user context response for /api/me endpoint.
+
+    This is the "source of truth" for frontend to understand:
+    - Who is logged in (user account)
+    - What is their organizational identity (academic member)
+    - What permissions they have (role + category + WPs)
+    """
+    user: UserBasicInfo
+    academic_member: Optional[AcademicMemberContext] = None
+
     class Config:
         from_attributes = True
 

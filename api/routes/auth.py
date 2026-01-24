@@ -12,8 +12,10 @@ from typing import Optional
 
 from database.session import get_db
 from services.auth_service import AuthService
-from core.models import User, UserRole
+from core.models import User, UserRole, AcademicMember, ResearcherDetails
 from core.security import get_current_user, oauth2_scheme
+from sqlalchemy.orm import joinedload
+from schemas import UserMeResponse, UserBasicInfo, AcademicMemberContext, WorkPackageSchema
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -58,7 +60,62 @@ async def login(
     return {"access_token": access_token, "token_type": "bearer"}
 
 
-@router.get("/me", response_model=UserResponse)
-async def read_users_me(current_user: User = Depends(get_current_user)):
-    """Get current user information"""
-    return current_user
+@router.get("/me", response_model=UserMeResponse)
+async def read_users_me(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get complete user context including academic member information.
+
+    This endpoint is the "source of truth" for the frontend to understand:
+    - Who is logged in (user account info)
+    - What is their organizational identity (academic member)
+    - What permissions they have (role + category + WPs)
+
+    Returns:
+        UserMeResponse with user and academic_member data
+    """
+    # Build basic user info
+    user_info = UserBasicInfo(
+        id=current_user.id,
+        email=current_user.email,
+        role=current_user.role.value,
+        full_name=current_user.full_name
+    )
+
+    # Try to find associated academic member (by email match)
+    academic_member = db.query(AcademicMember).filter_by(
+        email=current_user.email
+    ).options(
+        joinedload(AcademicMember.researcher_details),
+        joinedload(AcademicMember.wps)
+    ).first()
+
+    member_context = None
+    if academic_member:
+        # Get researcher category if applicable
+        category = None
+        if academic_member.researcher_details:
+            category = academic_member.researcher_details.category
+
+        # Build WP list
+        wps = []
+        if academic_member.wps:
+            wps = [
+                WorkPackageSchema(id=wp.id, name=wp.name)
+                for wp in academic_member.wps
+            ]
+
+        member_context = AcademicMemberContext(
+            id=academic_member.id,
+            full_name=academic_member.full_name,
+            member_type=academic_member.member_type,
+            category=category,
+            wps=wps
+        )
+
+    return UserMeResponse(
+        user=user_info,
+        academic_member=member_context
+    )

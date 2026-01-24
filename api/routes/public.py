@@ -33,6 +33,7 @@ class PublicPublicationOut(BaseModel):
     url: Optional[str] = None
     doi: Optional[str] = None
     canonical_doi: Optional[str] = None  # Added for frontend compatibility
+    has_doi: bool = False  # Pre-computed for performance
     doi_verification_status: Optional[str] = None # pending, valid_openalex, valid_http, broken, repaired
     has_funding_ack: bool = False
     anid_report_status: str = "Pending"
@@ -229,6 +230,7 @@ async def get_public_publications(db: Session = Depends(get_db)):
                     "url": pub.url,
                     "doi": getattr(pub, "canonical_doi", None), 
                     "canonical_doi": getattr(pub, "canonical_doi", None),
+                    "has_doi": getattr(pub, "has_doi", False),  # ← NUEVO: Performance optimization field
                     "doi_verification_status": getattr(pub, "doi_verification_status", "pending"),
                     "has_funding_ack": getattr(pub, "has_funding_ack", False),
                     "anid_report_status": getattr(pub, "anid_report_status", "Pending"),

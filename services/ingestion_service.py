@@ -146,6 +146,11 @@ class IngestionService:
             except Exception as e:
                 print(f"   [Ingestion] ⚠️ Could not fetch OpenAlex metadata by DOI: {e}")
         
+        # Initialize WOS variables early to avoid UnboundLocalError
+        wos_match = None
+        wos_match_type = None
+
+        
         # FALLBACK: Search by Title if DOI lookup failed or no DOI found
         if not metrics_data:
             try:
@@ -167,9 +172,7 @@ class IngestionService:
             except Exception as e:
                 print(f"   [Ingestion] ⚠️ Title search failed: {e}")
 
-        # Update local variables from found metrics
-            except Exception as e:
-                print(f"   [Ingestion] ⚠️ Title search failed: {e}")
+
 
         # Update local variables from found metrics
         if metrics_data:
@@ -266,11 +269,12 @@ class IngestionService:
             
             # Campos de OpenAlex
             canonical_doi=canonical_doi_value,
+            has_doi=bool(canonical_doi_value or (enriched_data.get("doi") and ("10." in enriched_data.get("doi") or "doi.org" in enriched_data.get("doi")))),  # Pre-compute for performance
             doi_verification_status=doi_verification_status,
             metrics_data=metrics_data,
             
             # NUEVOS CAMPOS
-            enrichment_status="metadata_only",  # ← Estado inicial
+            enrichment_status="pdf_attached",  # ← Corrected status for PDF uploads
             journal_name_temp=detected_journal_name,  # ← Guardar temporalmente
             publisher_temp=publisher,  # ← Guardar temporalmente
         )

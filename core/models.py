@@ -3,7 +3,7 @@ SQLAlchemy Models for CECAN Platform
 Database models implementing authentication, compliance, and administrative management.
 """
 
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, Text, ForeignKey, DateTime, Enum as SQLEnum, Float, JSON, Date
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, Text, ForeignKey, DateTime, Enum as SQLEnum, Float, JSON, Date, func, Index, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
 from datetime import datetime
@@ -18,20 +18,42 @@ Base = declarative_base()
 
 class UserRole(str, enum.Enum):
     """User role enumeration for RBAC."""
+    SUPER_ADMIN = "super_admin"  # Full system access, dangerous operations allowed
     ADMIN = "admin"           # Full system access, can manage users
-    EDITOR = "editor"         # Can edit data, run sync, manage content
+    STAFF = "staff"           # Administrative staff (secretaría)
+    PI = "pi"                 # Principal Investigator
+    RESEARCHER = "researcher" # Researcher with limited access
+    STUDENT = "student"       # Student with minimal access
+    EDITOR = "editor"         # Can edit data, run sync, manage content (legacy)
     VIEWER = "viewer"         # Read-only access
+
+
+class RaciRole(str, enum.Enum):
+    """RACI responsibility roles."""
+    R = "R"  # Responsible - Does the work
+    A = "A"  # Accountable - Ultimately answerable
+    C = "C"  # Consulted - Provides input
+    I = "I"  # Informed - Kept in the loop
+
+
+class ResourceType(str, enum.Enum):
+    """Types of resources that can have responsibility assignments."""
+    SCIENTIFIC_PROJECT = "scientific_project"
+    PROJECT_ACTIVITY = "project_activity"
+    PUBLICATION = "publication"
+    WORK_PACKAGE = "work_package"
 
 
 class User(Base):
     """User accounts with role-based access control."""
     __tablename__ = "users"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String(255), unique=True, nullable=False, index=True)
     hashed_password = Column(String(255), nullable=False)
     full_name = Column(String(255), nullable=True)
-    role = Column(SQLEnum(UserRole), nullable=False, default=UserRole.VIEWER)
+    # Use values_callable to ensure enum values (e.g., "pi") are used instead of names (e.g., "PI")
+    role = Column(SQLEnum(UserRole, values_callable=lambda x: [e.value for e in x]), nullable=False, default=UserRole.VIEWER)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     last_login = Column(DateTime, nullable=True)
@@ -39,7 +61,50 @@ class User(Base):
     # Relationships
     # Relationships
     # supervised_students = relationship("Student", back_populates="tutor", foreign_keys="Student.tutor_id")
-    
+
+
+class ResponsibilityAssignment(Base):
+    """
+    RACI responsibility assignments for resources.
+
+    This table links academic members to resources (projects, activities, publications, etc.)
+    with specific RACI roles, providing a flexible authorization model.
+    """
+    __tablename__ = "responsibility_assignments"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # Resource identification
+    resource_type = Column(SQLEnum(ResourceType), nullable=False, index=True)
+    resource_id = Column(Integer, nullable=False, index=True)
+
+    # RACI role
+    raci_role = Column(SQLEnum(RaciRole), nullable=False, index=True)
+
+    # Assignment to organizational entity (mandatory)
+    member_id = Column(Integer, ForeignKey("academic_members.id"), nullable=False, index=True)
+
+    # Optional link to user account (for login-based access)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+
+    # Audit metadata
+    created_at = Column(DateTime, default=datetime.utcnow)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # Relationships
+    member = relationship("AcademicMember", foreign_keys=[member_id], backref="responsibilities")
+    user = relationship("User", foreign_keys=[user_id], backref="responsibilities")
+    creator = relationship("User", foreign_keys=[created_by])
+
+    # Composite unique constraint to prevent duplicate assignments
+    __table_args__ = (
+        # Ensure unique (resource_type, resource_id, member_id, raci_role) combinations
+        # This prevents assigning the same RACI role twice to the same member on the same resource
+        Index('idx_resource_lookup', 'resource_type', 'resource_id'),
+        Index('idx_member_lookup', 'member_id'),
+        Index('idx_user_lookup', 'user_id'),
+    )
+
 
 # ===========================
 # COMPLIANCE & AUDIT ("EL ROBOT")
@@ -108,6 +173,7 @@ class Publication(Base):
     category = Column(String(100), nullable=True) # Renamed from categoria
     url = Column(Text, nullable=True) # Renamed from url_origen
     canonical_doi = Column(String(100), unique=True, nullable=True, index=True)  # Normalized DOI
+    has_doi = Column(Boolean, default=False, nullable=False, index=True)  # Pre-computed flag for performance
     local_path = Column(Text, nullable=True) # Renamed from path_pdf_local
     content = Column(Text, nullable=True) # Renamed from contenido_texto
     
@@ -151,6 +217,12 @@ class Publication(Base):
     researcher_connections = relationship("ResearcherPublication", back_populates="publication", cascade="all, delete-orphan")
     chunks = relationship("PublicationChunk", back_populates="publication", cascade="all, delete-orphan")
     impact_metrics = relationship("PublicationImpact", uselist=False, back_populates="publication", cascade="all, delete-orphan")
+
+    @property
+    def summary(self):
+        return self.summary_es or self.summary_en
+
+
 
 
 # ===========================
@@ -896,6 +968,104 @@ class ProjectActivity(Base):
     def formatted_number(self) -> str:
         return f"({self.number})"
 
+
+
+# ==============================================================================
+# SCHOLAR INTELLIGENCE - Embeddings & Paper Cache
+# ==============================================================================
+
+class ScholarEnrichmentStatus(str, enum.Enum):
+    """Status of Scholar API enrichment for a paper."""
+    PENDING = "pending"           # Not yet enriched
+    ENRICHED = "enriched"         # Successfully enriched
+    FAILED = "failed"             # API call failed
+    NOT_FOUND = "not_found"       # DOI not found in Semantic Scholar
+    RATE_LIMITED = "rate_limited" # Hit API rate limit
+
+
+class ScholarPaperData(Base):
+    """
+    Scholar API cache and embeddings storage.
+    Stores paper intelligence fetched from Semantic Scholar API.
+    DOI is the primary key, linking to publications table.
+    """
+    __tablename__ = "scholar_paper_data"
+    
+    # Primary Key (DOI from publications)
+    doi = Column(String(255), primary_key=True, index=True)
+    publication_id = Column(Integer, ForeignKey("publications.id"), nullable=True, index=True)
+    
+    # Semantic Scholar IDs
+    semantic_scholar_id = Column(String(50), unique=True, nullable=True, index=True)
+    
+    # Core Metadata (cached from Scholar)
+    title = Column(Text, nullable=True)
+    year = Column(Integer, nullable=True)
+    authors = Column(JSON, nullable=True)  # List of {name, authorId, orcid}
+    
+    # AI Intelligence
+    tldr = Column(Text, nullable=True)
+    abstract = Column(Text, nullable=True)
+    
+    # Embeddings (768 dimensions from Specter model)
+    # Using PostgreSQL ARRAY type for flexibility
+    # Can be migrated to pgvector extension later for similarity search
+    embedding_vector = Column(JSON, nullable=True)  # Stored as JSON array
+    
+    # Citation Metrics
+    citation_count = Column(Integer, default=0)
+    influential_citation_count = Column(Integer, default=0)
+    
+    # Citation Intelligence (JSON)
+    intent_breakdown = Column(JSON, nullable=True)  # {"methodology": 5, "result": 3, "background": 2}
+    smart_citations = Column(JSON, nullable=True)   # Detailed citations with intents
+    
+    # Reference Graph Data
+    reference_nodes = Column(JSON, nullable=True)  # Graph nodes for visualization
+    reference_links = Column(JSON, nullable=True)  # Graph links for visualization
+    
+    # Enrichment Control
+    enrichment_status = Column(SQLEnum(ScholarEnrichmentStatus), 
+                               default=ScholarEnrichmentStatus.PENDING, 
+                               nullable=False, 
+                               index=True)
+    last_enriched_at = Column(DateTime, nullable=True)
+    error_message = Column(Text, nullable=True)  # Error details if failed
+    
+    # Audit
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    publication = relationship("Publication", backref="scholar_data")
+
+
+class ResearchMapSnapshot(Base):
+    __tablename__ = "research_map_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    parameters = Column(JSON)  # {n_neighbors, min_dist, n_clusters, metric}
+    total_publications = Column(Integer)
+
+    points = relationship("ResearchMapPoint", back_populates="snapshot", cascade="all, delete-orphan")
+
+
+class ResearchMapPoint(Base):
+    __tablename__ = "research_map_points"
+
+    id = Column(Integer, primary_key=True, index=True)
+    snapshot_id = Column(Integer, ForeignKey("research_map_snapshots.id", ondelete="CASCADE"))
+    publication_id = Column(Integer, ForeignKey("publications.id", ondelete="CASCADE"))
+
+    x = Column(Float, nullable=False)
+    y = Column(Float, nullable=False)
+    z = Column(Float, nullable=False)
+    cluster_id = Column(Integer)
+    cluster_label = Column(String)
+
+    snapshot = relationship("ResearchMapSnapshot", back_populates="points")
+    publication = relationship("Publication")
 
 if __name__ == "__main__":
     # Create all tables when running this module directly

@@ -40,26 +40,41 @@ class AuthService:
             return None
         return user
     
-    def create_user(self, email: str, password: str, full_name: str = None, 
-                    role: UserRole = UserRole.VIEWER) -> User:
+    def create_user(self, email: str, password: str, full_name: str = None,
+                    role = UserRole.VIEWER) -> User:
         """
         Create a new user.
-        
+
         Args:
             email: User email
             password: Plain text password
             full_name: Optional full name
-            role: User role (default: VIEWER)
-        
+            role: User role (can be string or UserRole enum, default: VIEWER)
+
         Returns:
             Created User object
         """
         hashed_password = get_password_hash(password)
+
+        # Convert string role to UserRole enum if needed
+        if isinstance(role, str):
+            # Try to find the enum by value (e.g., "pi" -> UserRole.PI)
+            role_enum = None
+            for role_option in UserRole:
+                if role_option.value == role:
+                    role_enum = role_option
+                    break
+
+            if role_enum is None:
+                raise ValueError(f"Invalid role: {role}. Must be one of: {[r.value for r in UserRole]}")
+
+            role = role_enum
+
         user = User(
             email=email,
             hashed_password=hashed_password,
             full_name=full_name,
-            role=role
+            role=role  # SQLAlchemy will use the enum's .value (e.g., "pi") thanks to values_callable
         )
         self.db.add(user)
         self.db.commit()
