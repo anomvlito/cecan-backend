@@ -1,9 +1,0 @@
-     full_name     |        email        | member_type 
--------------------+---------------------+-------------
- Dr. Gregory House | pi@cecan.cl         | researcher
- Dr. James Wilson  | researcher@cecan.cl | researcher
- Lisa Cuddy        | staff@cecan.cl      | staff
- Eric Foreman      | student@cecan.cl    | student
- Visitor Guest     | viewer@cecan.cl     | researcher
-(5 rows)
-
