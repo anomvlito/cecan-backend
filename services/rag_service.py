@@ -11,8 +11,8 @@ from database.session import get_session
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func
 from core.models import (
-    Project, WorkPackage, AcademicMember, ProjectResearcher, 
-    Publication, PublicationChunk, ResearcherPublication
+    Project, WorkPackage, AcademicMember, ProjectResearcher,
+    Publication, PublicationChunk, ResearcherPublication, ProjectActivity, ScientificProject
 )
 
 # Tenacity for API retry logic
@@ -124,38 +124,81 @@ class SemanticSearchEngine:
         self._initialize_embeddings()
 
     def _get_projects_for_embedding(self):
-        """Fetches all projects with rich context for embedding."""
+        """Fetches all projects AND Gantt tasks with rich context for embedding."""
         session = get_session()
         try:
-            # Fetch all projects with relationships
-            projects = session.query(Project).all()
-            
+            # 1. Fetch Scientific Projects (Active system)
+            projects = session.query(ScientificProject).all()
+
             project_data = []
             for p in projects:
                 # Build context string
-                wp_name = p.wp.name if p.wp else "Sin WP"
-                
-                # Researchers
-                researchers_txt = []
-                for pr in p.researcher_connections:
-                    name = pr.member.full_name
-                    role = pr.role or "Miembro"
-                    researchers_txt.append(f"{name} ({role})")
-                
-                # Nodes
-                nodes_txt = [pn.node.name for pn in p.node_connections]
-                
-                full_text = f"Título: {p.title}. WP: {wp_name}. Nodos: {', '.join(nodes_txt)}. Investigadores: {', '.join(researchers_txt)}"
-                
+                wp_name = p.work_package.value if p.work_package else "Sin WP"
+
+                # Build rich context
+                status = p.status.value if p.status else "Sin estado"
+                budget_str = f"Presupuesto: ${p.budget_allocated:,.0f}" if p.budget_allocated else ""
+                pi_name = p.pi.full_name if p.pi else (p.pi_name or "Sin PI")
+
+                full_text = f"[PROYECTO CIENTÍFICO] Título: {p.title}. WP: {wp_name}. PI: {pi_name}. Estado: {status}. {budget_str}. Código: {p.code or 'N/A'}"
+
                 project_data.append({
                     "metadata": {
                         "id": p.id,
+                        "type": "scientific_project",
                         "title": p.title,
-                        "wp_name": wp_name
+                        "wp_name": wp_name,
+                        "status": status
                     },
                     "text": full_text
                 })
+
+            # 2. Fetch Project Activities (Tasks from Scientific Projects)
+            activities = session.query(ProjectActivity).filter(ProjectActivity.status != 'done').all() # Focus on active tasks
+
+            for activity in activities:
+                 # Get project and WP info
+                 project = activity.project
+                 wp_name = project.work_package.value if project.work_package else "General"
+                 project_title = project.title
+
+                 status_map = {
+                     "pending": "Pendiente",
+                     "in_progress": "En Progreso",
+                     "blocked": "BLOQUEADA",
+                     "done": "Completada"
+                 }
+                 status_txt = status_map.get(activity.status, activity.status) if activity.status else "Sin estado"
+
+                 # Format dates
+                 date_str = ""
+                 if activity.start_month and activity.end_month:
+                     date_str = f"Fechas: {activity.start_month.strftime('%Y-%m-%d')} a {activity.end_month.strftime('%Y-%m-%d')}"
+                 elif activity.start_month:
+                     date_str = f"Inicio: {activity.start_month.strftime('%Y-%m-%d')}"
+
+                 # Progress
+                 progress_str = f"Progreso: {int(activity.progress * 100)}%" if activity.progress else ""
+
+                 full_text = f"[ACTIVIDAD] {activity.description}. Proyecto: {project_title}. Estado: {status_txt}. {progress_str}. WP: {wp_name}. {date_str}"
+
+                 project_data.append({
+                    "metadata": {
+                        "id": activity.id,
+                        "type": "project_activity",
+                        "title": activity.description,
+                        "wp_name": wp_name,
+                        "status": status_txt,
+                        "project_title": project_title
+                    },
+                    "text": full_text
+                })
+
             return project_data
+        
+        except Exception as e:
+            print(f"   [Error] Failed to fetch data for embedding: {e}")
+            return []
         finally:
             session.close()
 
@@ -165,9 +208,8 @@ class SemanticSearchEngine:
         # Check if persisted index exists
         if VECTORSTORE_PATH.exists() and (VECTORSTORE_PATH / "index.faiss").exists():
             print("   [System] Loading existing project embeddings from disk...")
-            print("   [System] FAISS caching disabled (libs missing). Generating embeddings in memory...")
-            # self._load_embeddings_from_disk()
-            self._generate_and_save_embeddings()
+            self._load_embeddings_from_disk()
+            # self._generate_and_save_embeddings()
         else:
             print("   [System] No cached embeddings found. Generating and saving new embeddings...")
             self._generate_and_save_embeddings()
@@ -222,8 +264,8 @@ class SemanticSearchEngine:
             print(f"   [System] Generated embeddings for {len(self.projects)} projects.")
             
             # Save to FAISS index
-            # self._save_embeddings_to_disk()
-            print("   [System] Skipping disk save (FAISS missing).")
+            self._save_embeddings_to_disk()
+            # print("   [System] Skipping disk save (FAISS missing).")
             
         except Exception as e:
             print(f"   [Error] Failed to generate project embeddings: {e}")
@@ -529,9 +571,12 @@ class SemanticSearchEngine:
             
             results = []
             for idx in top_indices:
-                project = self.projects[idx]
+                item = self.projects[idx]
+                item_type = item['metadata'].get('type', 'project')
+                
                 results.append({
-                    "project": project['metadata'],
+                    "item": item['metadata'],
+                    "type": item_type, 
                     "score": float(scores[idx]),
                     "match_reason": "Semantic Match"
                 })

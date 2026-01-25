@@ -14,7 +14,7 @@ from core.security import get_current_user
 from core.models import (
     User, UserRole, ScientificProject, ProjectActivity, AcademicMember,
     ResearcherDetails, WorkPackageType, ProjectStatusType, ActivityStatusType,
-    PaymentStatusType, ResourceType
+    PaymentStatusType, ResourceType, ResponsibilityAssignment, RaciRole
 )
 from database.session import get_db
 from services.authz import can, get_responsibilities_for_resource
@@ -114,6 +114,8 @@ class ActivityCreate(BaseModel):
     budget_allocated: float = 0.0
     payment_status: str = "pending"
     payment_proof_url: Optional[str] = None
+    # Assignment - list of user IDs to assign as Responsible
+    assigned_user_ids: Optional[List[int]] = None
 
 
 class ActivityUpdate(BaseModel):
@@ -128,6 +130,8 @@ class ActivityUpdate(BaseModel):
     budget_allocated: Optional[float] = None
     payment_status: Optional[str] = None
     payment_proof_url: Optional[str] = None
+    # Assignment - list of user IDs to assign as Responsible
+    assigned_user_ids: Optional[List[int]] = None
 
 
 class ActivityResponse(BaseModel):
@@ -144,6 +148,8 @@ class ActivityResponse(BaseModel):
     budget_allocated: float
     payment_status: str
     payment_proof_url: Optional[str]
+    # Assignments
+    assigned_user_ids: List[int] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
@@ -233,6 +239,21 @@ class ProjectListItem(BaseModel):
 
 
 # ===================
+# HELPER FUNCTIONS
+# ===================
+
+def get_assigned_user_ids(db: Session, activity_id: int) -> List[int]:
+    """Get user IDs assigned to an activity with Responsible (R) role."""
+    assignments = db.query(ResponsibilityAssignment).filter(
+        ResponsibilityAssignment.resource_type == ResourceType.PROJECT_ACTIVITY,
+        ResponsibilityAssignment.resource_id == activity_id,
+        ResponsibilityAssignment.raci_role == RaciRole.R,
+        ResponsibilityAssignment.user_id.isnot(None)
+    ).all()
+    return [a.user_id for a in assignments if a.user_id]
+
+
+# ===================
 # PROJECT ENDPOINTS
 # ===================
 
@@ -292,7 +313,8 @@ async def list_projects(
                     progress=a.progress or 0,
                     budget_allocated=a.budget_allocated or 0,
                     payment_status=a.payment_status.value if a.payment_status else "pending",
-                    payment_proof_url=a.payment_proof_url
+                    payment_proof_url=a.payment_proof_url,
+                    assigned_user_ids=get_assigned_user_ids(db, a.id)
                 )
                 for a in sorted(p.activities, key=lambda x: x.number)
             ]
@@ -348,7 +370,8 @@ async def get_project(
                 progress=a.progress or 0,
                 budget_allocated=a.budget_allocated or 0,
                 payment_status=a.payment_status.value if a.payment_status else "pending",
-                payment_proof_url=a.payment_proof_url
+                payment_proof_url=a.payment_proof_url,
+                assigned_user_ids=get_assigned_user_ids(db, a.id)
             )
             for a in sorted(project.activities, key=lambda x: x.number)
         ],
@@ -405,6 +428,22 @@ async def create_project(
     db.add(project)
     db.flush()
 
+    # Assign creator as Accountable for the Project itself
+    if current_user.email:
+        creator_member = db.query(AcademicMember).filter(
+            AcademicMember.email == current_user.email
+        ).first()
+        if creator_member:
+            project_assignment = ResponsibilityAssignment(
+                resource_type=ResourceType.SCIENTIFIC_PROJECT,
+                resource_id=project.id,
+                raci_role=RaciRole.A,
+                member_id=creator_member.id,
+                user_id=current_user.id,
+                created_by=current_user.id
+            )
+            db.add(project_assignment)
+    
     # Create activities
     for idx, act_data in enumerate(data.activities):
         activity = ProjectActivity(
@@ -418,9 +457,45 @@ async def create_project(
             # Financial fields
             budget_allocated=act_data.budget_allocated or 0.0,
             payment_status=PaymentStatusType(act_data.payment_status.lower()) if act_data.payment_status else PaymentStatusType.PENDING,
-            payment_proof_url=act_data.payment_proof_url
+            payment_proof_url=act_data.payment_proof_url,
+            # Audit
+            created_by=current_user.id
         )
         db.add(activity)
+        db.flush()  # Get activity.id
+
+        # Assign creator as Accountable
+        if current_user.email:
+            creator_member = db.query(AcademicMember).filter(
+                AcademicMember.email == current_user.email
+            ).first()
+            pi_assignment = ResponsibilityAssignment(
+                resource_type=ResourceType.PROJECT_ACTIVITY,
+                resource_id=activity.id,
+                raci_role=RaciRole.A,
+                member_id=creator_member.id if creator_member else None,
+                user_id=current_user.id,
+                created_by=current_user.id
+            )
+            db.add(pi_assignment)
+
+        # Create assignments for assigned users
+        if hasattr(act_data, 'assigned_user_ids') and act_data.assigned_user_ids:
+            for user_id in act_data.assigned_user_ids:
+                assigned_user = db.query(User).filter(User.id == user_id).first()
+                if assigned_user:
+                    academic_member = db.query(AcademicMember).filter(
+                        AcademicMember.email == assigned_user.email
+                    ).first()
+                    assignment = ResponsibilityAssignment(
+                        resource_type=ResourceType.PROJECT_ACTIVITY,
+                        resource_id=activity.id,
+                        raci_role=RaciRole.R,
+                        member_id=academic_member.id if academic_member else None,
+                        user_id=assigned_user.id,
+                        created_by=current_user.id
+                    )
+                    db.add(assignment)
 
     db.commit()
     db.refresh(project)
@@ -477,10 +552,24 @@ async def update_project(
 
     # Handle activities if provided (replace strategy)
     if data.activities is not None:
+        # Get existing activity IDs
+        existing_activity_ids = [
+            a.id for a in db.query(ProjectActivity).filter(
+                ProjectActivity.project_id == project_id
+            ).all()
+        ]
+
+        # Delete assignments for activities that will be deleted
+        if existing_activity_ids:
+            db.query(ResponsibilityAssignment).filter(
+                ResponsibilityAssignment.resource_type == ResourceType.PROJECT_ACTIVITY,
+                ResponsibilityAssignment.resource_id.in_(existing_activity_ids)
+            ).delete(synchronize_session=False)
+
         # Delete existing activities
         db.query(ProjectActivity).filter(
             ProjectActivity.project_id == project_id
-        ).delete()
+        ).delete(synchronize_session=False)
 
         # Create new activities
         for idx, act_data in enumerate(data.activities):
@@ -495,9 +584,45 @@ async def update_project(
                 # Financial fields
                 budget_allocated=act_data.budget_allocated or 0.0,
                 payment_status=PaymentStatusType(act_data.payment_status.lower()) if act_data.payment_status else PaymentStatusType.PENDING,
-                payment_proof_url=act_data.payment_proof_url
+                payment_proof_url=act_data.payment_proof_url,
+                # Audit
+                created_by=current_user.id
             )
             db.add(activity)
+            db.flush()
+
+            # Assign creator as Accountable
+            if current_user.email:
+                creator_member = db.query(AcademicMember).filter(
+                    AcademicMember.email == current_user.email
+                ).first()
+                pi_assignment = ResponsibilityAssignment(
+                    resource_type=ResourceType.PROJECT_ACTIVITY,
+                    resource_id=activity.id,
+                    raci_role=RaciRole.A,
+                    member_id=creator_member.id if creator_member else None,
+                    user_id=current_user.id,
+                    created_by=current_user.id
+                )
+                db.add(pi_assignment)
+
+            # Create assignments for assigned users
+            if hasattr(act_data, 'assigned_user_ids') and act_data.assigned_user_ids:
+                for user_id in act_data.assigned_user_ids:
+                    assigned_user = db.query(User).filter(User.id == user_id).first()
+                    if assigned_user:
+                        academic_member = db.query(AcademicMember).filter(
+                            AcademicMember.email == assigned_user.email
+                        ).first()
+                        assignment = ResponsibilityAssignment(
+                            resource_type=ResourceType.PROJECT_ACTIVITY,
+                            resource_id=activity.id,
+                            raci_role=RaciRole.R,
+                            member_id=academic_member.id if academic_member else None,
+                            user_id=assigned_user.id,
+                            created_by=current_user.id
+                        )
+                        db.add(assignment)
 
     db.commit()
     db.refresh(project)
@@ -597,12 +722,50 @@ async def add_activity(
         # Financial fields
         budget_allocated=data.budget_allocated or 0.0,
         payment_status=PaymentStatusType(data.payment_status.lower()) if data.payment_status else PaymentStatusType.PENDING,
-        payment_proof_url=data.payment_proof_url
+        payment_proof_url=data.payment_proof_url,
+        # Audit
+        created_by=current_user.id
     )
 
     db.add(activity)
     db.commit()
     db.refresh(activity)
+
+    # Assign creator (PI) as Accountable automatically
+    if current_user.academic_member:
+        pi_assignment = ResponsibilityAssignment(
+            resource_type=ResourceType.PROJECT_ACTIVITY,
+            resource_id=activity.id,
+            raci_role=RaciRole.A,  # Accountable (supervisor)
+            member_id=current_user.academic_member.id,
+            user_id=current_user.id,
+            created_by=current_user.id
+        )
+        db.add(pi_assignment)
+
+    # Create RACI assignments for assigned users
+    if data.assigned_user_ids:
+        for user_id in data.assigned_user_ids:
+            # Get user (no joinedload - academic_member is a property not a relationship)
+            assigned_user = db.query(User).filter(User.id == user_id).first()
+
+            if assigned_user:
+                # Try to find academic_member by email
+                academic_member = db.query(AcademicMember).filter(
+                    AcademicMember.email == assigned_user.email
+                ).first()
+
+                assignment = ResponsibilityAssignment(
+                    resource_type=ResourceType.PROJECT_ACTIVITY,
+                    resource_id=activity.id,
+                    raci_role=RaciRole.R,  # Responsible
+                    member_id=academic_member.id if academic_member else None,
+                    user_id=assigned_user.id,  # ALWAYS set user_id
+                    created_by=current_user.id
+                )
+                db.add(assignment)
+
+        db.commit()
 
     return ActivityResponse(
         id=activity.id,
@@ -645,17 +808,18 @@ async def update_activity(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Check permission to update project activities
-    responsibilities = get_responsibilities_for_resource(
+    # Check permission to update this ACTIVITY (not just the project)
+    # This allows users with RACI R on the activity to update it
+    activity_responsibilities = get_responsibilities_for_resource(
         db,
-        ResourceType.SCIENTIFIC_PROJECT.value,
-        project_id
+        ResourceType.PROJECT_ACTIVITY.value,
+        activity.id
     )
 
-    if not can(current_user, "update", project, responsibilities):
+    if not can(current_user, "update", activity, activity_responsibilities):
         raise HTTPException(
             status_code=403,
-            detail="You don't have permission to update activities in this project"
+            detail="You don't have permission to update this activity"
         )
 
     # Validate dates
@@ -667,6 +831,9 @@ async def update_activity(
 
     update_data = data.model_dump(exclude_unset=True)
 
+    # Extract assigned_user_ids before updating activity fields
+    assigned_user_ids = update_data.pop('assigned_user_ids', None)
+
     for field, value in update_data.items():
         if field == "status" and value:
             value = ActivityStatusType(value)
@@ -676,6 +843,57 @@ async def update_activity(
 
     db.commit()
     db.refresh(activity)
+
+    # Update RACI assignments if assigned_user_ids is not None
+    if assigned_user_ids is not None:
+        # Delete only "R" (Responsible) assignments, keep "A" (Accountable) assignments
+        db.query(ResponsibilityAssignment).filter(
+            ResponsibilityAssignment.resource_type == ResourceType.PROJECT_ACTIVITY,
+            ResponsibilityAssignment.resource_id == activity.id,
+            ResponsibilityAssignment.raci_role == RaciRole.R
+        ).delete()
+
+        # Create new "R" assignments
+        for user_id in assigned_user_ids:
+            # Get user without invalid joinedload
+            assigned_user = db.query(User).filter(User.id == user_id).first()
+
+            if assigned_user:
+                # Find academic_member by email
+                academic_member = db.query(AcademicMember).filter(
+                    AcademicMember.email == assigned_user.email
+                ).first()
+
+                if academic_member:
+                    assignment = ResponsibilityAssignment(
+                        resource_type=ResourceType.PROJECT_ACTIVITY,
+                        resource_id=activity.id,
+                        raci_role=RaciRole.R,
+                        member_id=academic_member.id,
+                        user_id=assigned_user.id,
+                        created_by=current_user.id
+                    )
+                    db.add(assignment)
+
+        # Ensure there's at least one "A" (Accountable) - if not, assign creator as "A"
+        accountable_exists = db.query(ResponsibilityAssignment).filter(
+            ResponsibilityAssignment.resource_type == ResourceType.PROJECT_ACTIVITY,
+            ResponsibilityAssignment.resource_id == activity.id,
+            ResponsibilityAssignment.raci_role == RaciRole.A
+        ).first()
+
+        if not accountable_exists and current_user.academic_member:
+            pi_assignment = ResponsibilityAssignment(
+                resource_type=ResourceType.PROJECT_ACTIVITY,
+                resource_id=activity.id,
+                raci_role=RaciRole.A,
+                member_id=current_user.academic_member.id,
+                user_id=current_user.id,
+                created_by=current_user.id
+            )
+            db.add(pi_assignment)
+
+        db.commit()
 
     return ActivityResponse(
         id=activity.id,
@@ -688,7 +906,8 @@ async def update_activity(
         progress=activity.progress or 0,
         budget_allocated=activity.budget_allocated or 0,
         payment_status=activity.payment_status.value if activity.payment_status else "pending",
-        payment_proof_url=activity.payment_proof_url
+        payment_proof_url=activity.payment_proof_url,
+        assigned_user_ids=get_assigned_user_ids(db, activity.id)
     )
 
 

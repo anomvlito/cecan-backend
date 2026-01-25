@@ -13,8 +13,8 @@ from config import APP_TITLE, APP_VERSION, APP_DESCRIPTION, CORS_ORIGINS
 from api.routes import (
     auth, compliance, publications, researchers, rag, dashboard,
     members, files, reports, public, catalogs, external, students,
-    enrichment, system, analytics, gantt, scientific_projects, research_map, exports,
-    responsibilities
+    enrichment, system, analytics, scientific_projects, research_map, exports,
+    responsibilities, users
 )
 # Scholar Intelligence Module  
 from modules.scholar import router as scholar_router  # ← Scholar Module
@@ -37,6 +37,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(auth.router, prefix="/api")
+app.include_router(users.router, prefix="/api")  # ← Users for assignment
 app.include_router(responsibilities.router, prefix="/api")  # ← RACI Responsibilities
 app.include_router(compliance.router, prefix="/api")
 app.include_router(publications.router, prefix="/api")
@@ -53,7 +54,7 @@ app.include_router(external.router, prefix="/api/external")
 app.include_router(students.router, prefix="/api")
 app.include_router(system.router, prefix="/api/system")
 app.include_router(analytics.router, prefix="/api")
-app.include_router(gantt.router, prefix="/api")
+# app.include_router(gantt.router, prefix="/api")  # REMOVED: Gantt tables deleted, using project_activities instead
 app.include_router(scientific_projects.router, prefix="/api")
 app.include_router(research_map.router, prefix="/api")
 app.include_router(exports.router, prefix="/api")

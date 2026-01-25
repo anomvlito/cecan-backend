@@ -286,14 +286,26 @@ async def get_my_dashboard(
                 id=assignment.resource_id
             ).first()
 
+            # Skip if activity doesn't exist (orphan assignment)
+            if not activity:
+                # Log warning but don't fail - just skip this assignment
+                import logging
+                logging.warning(
+                    f"Orphan assignment detected: Assignment #{assignment.id} "
+                    f"points to non-existent activity #{assignment.resource_id}"
+                )
+                continue
+
             if activity:
                 # Get parent project
                 project = activity.project
 
                 item_data["title"] = activity.description
+                item_data["project_id"] = project.id if project else None
                 item_data["project_name"] = project.title if project else None
                 item_data["project_code"] = project.code if project else None
                 item_data["status"] = activity.status.value if activity.status else None
+                item_data["start_date"] = activity.start_month
                 item_data["deadline"] = activity.end_month
                 item_data["progress"] = activity.progress
                 item_data["budget_allocated"] = activity.budget_allocated
@@ -302,16 +314,55 @@ async def get_my_dashboard(
                 if activity.end_month and activity.status and activity.status.value != "completed":
                     item_data["is_overdue"] = activity.end_month < dt.now().date()
 
+                # Find who has Accountable role for this activity
+                accountable_assignment = db.query(ResponsibilityAssignment).filter(
+                    ResponsibilityAssignment.resource_type == ResourceType.PROJECT_ACTIVITY,
+                    ResponsibilityAssignment.resource_id == activity.id,
+                    ResponsibilityAssignment.raci_role == RaciRole.A
+                ).first()
+
+                if accountable_assignment:
+                    accountable_member = db.query(AcademicMember).filter_by(
+                        id=accountable_assignment.member_id
+                    ).first()
+                    if accountable_member:
+                        item_data["accountable_name"] = accountable_member.full_name
+                        item_data["accountable_email"] = accountable_member.email
+
+                # Find who has Responsible role for this activity
+                responsible_assignments = db.query(ResponsibilityAssignment).filter(
+                    ResponsibilityAssignment.resource_type == ResourceType.PROJECT_ACTIVITY,
+                    ResponsibilityAssignment.resource_id == activity.id,
+                    ResponsibilityAssignment.raci_role == RaciRole.R
+                ).all()
+                
+                assigned_names = []
+                for resp in responsible_assignments:
+                    resp_member = db.query(AcademicMember).filter_by(id=resp.member_id).first()
+                    if resp_member:
+                        assigned_names.append(resp_member.full_name)
+                item_data["assigned_names"] = assigned_names
+
         elif assignment.resource_type == ResourceType.SCIENTIFIC_PROJECT:
             project = db.query(ScientificProject).filter_by(
                 id=assignment.resource_id
             ).first()
+
+            # Skip if project doesn't exist (orphan assignment)
+            if not project:
+                import logging
+                logging.warning(
+                    f"Orphan assignment detected: Assignment #{assignment.id} "
+                    f"points to non-existent project #{assignment.resource_id}"
+                )
+                continue
 
             if project:
                 item_data["title"] = project.title
                 item_data["project_name"] = None  # It's the project itself
                 item_data["project_code"] = project.code
                 item_data["status"] = project.status.value if project.status else None
+                item_data["start_date"] = dt.combine(project.start_date, dt.min.time()) if project.start_date else None
                 item_data["deadline"] = dt.combine(project.end_date, dt.min.time()) if project.end_date else None
                 item_data["progress"] = project.progress
                 item_data["budget_allocated"] = project.budget_allocated
@@ -319,6 +370,35 @@ async def get_my_dashboard(
                 # Calculate overdue
                 if project.end_date and project.status and project.status.value != "completed":
                     item_data["is_overdue"] = project.end_date < dt.now().date()
+
+                # Find who has Accountable role for this project
+                accountable_assignment = db.query(ResponsibilityAssignment).filter(
+                    ResponsibilityAssignment.resource_type == ResourceType.SCIENTIFIC_PROJECT,
+                    ResponsibilityAssignment.resource_id == project.id,
+                    ResponsibilityAssignment.raci_role == RaciRole.A
+                ).first()
+
+                if accountable_assignment:
+                    accountable_member = db.query(AcademicMember).filter_by(
+                        id=accountable_assignment.member_id
+                    ).first()
+                    if accountable_member:
+                        item_data["accountable_name"] = accountable_member.full_name
+                        item_data["accountable_email"] = accountable_member.email
+
+                # Find who has Responsible role for this project
+                responsible_assignments = db.query(ResponsibilityAssignment).filter(
+                    ResponsibilityAssignment.resource_type == ResourceType.SCIENTIFIC_PROJECT,
+                    ResponsibilityAssignment.resource_id == project.id,
+                    ResponsibilityAssignment.raci_role == RaciRole.R
+                ).all()
+                
+                assigned_names = []
+                for resp in responsible_assignments:
+                    resp_member = db.query(AcademicMember).filter_by(id=resp.member_id).first()
+                    if resp_member:
+                        assigned_names.append(resp_member.full_name)
+                item_data["assigned_names"] = assigned_names
 
         # Only add if we found the resource
         if item_data["title"]:

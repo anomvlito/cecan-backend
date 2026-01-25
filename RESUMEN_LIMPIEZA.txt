@@ -1,0 +1,101 @@
+╔════════════════════════════════════════════════════════════════╗
+║         📊 RESUMEN RÁPIDO - ARCHIVOS CECAN BACKEND             ║
+╚════════════════════════════════════════════════════════════════╝
+
+Total archivos Python: 238+
+
+┌─────────────────────────────────────────────────────────────────┐
+│  ✅ CORE (NO TOCAR) - 77 archivos                               │
+├─────────────────────────────────────────────────────────────────┤
+│  • main.py, config.py, schemas.py                               │
+│  • /core (4 archivos) - models, security                        │
+│  • /database (6 archivos) - session, init                       │
+│  • /api/routes (22 rutas ACTIVAS)                               │
+│  • /services (23 servicios ACTIVOS)                             │
+│  • /alembic/versions (18 migraciones)                           │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│  ✅ ÚTILES (Usar regularmente) - 32 scripts                     │
+├─────────────────────────────────────────────────────────────────┤
+│  • Seeds (5): seed_users_demo, seed_responsibilities            │
+│  • Sync (7): run_enrichment, import_personnel                   │
+│  • Enrich (8): batch_enrich_all, extract_orcids                 │
+│  • WOS (3): continue_wos_scraping, sync_wos_excel               │
+│  • Tools (4): get_auth_token, manage_users                      │
+│  • Raíz (5): batch_enrich_all.py, check_embeddings_status.py   │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│  ⚠️  DEBUG/DESARROLLO (Revisar si usas) - 65+ scripts           │
+├─────────────────────────────────────────────────────────────────┤
+│  • Debug en raíz (8): debug_*.py, diagnose_*.py, test_*.py      │
+│  • Audit (14): audit_compliance, audit_orcids                   │
+│  • Verify (10): verify_gantt_integration, validate_parser       │
+│  • Cleanup (10): clean_database, cleanup_orphans                │
+│  • Diagnostic (20+): check_*.py, diag_*.py, inspect_*.py        │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│  🗑️  POSIBLEMENTE OBSOLETOS - 40+ archivos                      │
+├─────────────────────────────────────────────────────────────────┤
+│  🔴 CRÍTICO - Resolver duplicados:                              │
+│     • api/routes/projects.py (NO registrado en main.py)         │
+│     • api/routes/scholar_endpoints.py (NO registrado)           │
+│                                                                  │
+│  📦 Legacy archivable:                                           │
+│     • scripts/legacy/ (19 archivos)                             │
+│     • migrations/ (15 archivos legacy)                          │
+│                                                                  │
+│  ✂️  Gantt comentado:                                            │
+│     • api/routes/gantt.py (REMOVED en main.py)                  │
+└─────────────────────────────────────────────────────────────────┘
+
+╔════════════════════════════════════════════════════════════════╗
+║                    🎯 ACCIONES RECOMENDADAS                    ║
+╚════════════════════════════════════════════════════════════════╝
+
+1️⃣  CRÍTICO (hacer ahora):
+   ┌─────────────────────────────────────────────────────────────┐
+   │ diff api/routes/projects.py api/routes/scientific_projects.py│
+   │ diff api/routes/scholar_endpoints.py modules/scholar/routes.py│
+   │ → Si son duplicados, eliminar el NO registrado              │
+   └─────────────────────────────────────────────────────────────┘
+
+2️⃣  REORGANIZAR (1 hora):
+   ┌─────────────────────────────────────────────────────────────┐
+   │ • Crear carpetas: scripts/{seeds,sync,enrich,tools,debug}  │
+   │ • Mover scripts a categorías                                │
+   │ • Archivar legacy: archive/legacy, archive/migrations_old  │
+   │ • Crear scripts/README.md documentando todo                 │
+   └─────────────────────────────────────────────────────────────┘
+
+3️⃣  VERIFICAR (10 min):
+   ┌─────────────────────────────────────────────────────────────┐
+   │ make backend                                                │
+   │ curl http://localhost:8000/health                           │
+   │ .venv/bin/python scripts/seeds/seed_users_demo.py          │
+   └─────────────────────────────────────────────────────────────┘
+
+╔════════════════════════════════════════════════════════════════╗
+║                    📈 ESTADO GENERAL                           ║
+╚════════════════════════════════════════════════════════════════╝
+
+  Código CORE:           ⭐⭐⭐⭐⭐  Excelente
+  Organización scripts:  ⭐⭐⭐     Mejorable
+  Archivos obsoletos:    ⭐⭐       Requiere limpieza
+
+  CALIFICACIÓN TOTAL:    ⭐⭐⭐⭐   (4/5)
+
+╔════════════════════════════════════════════════════════════════╗
+║                    📚 DOCUMENTOS CREADOS                       ║
+╚════════════════════════════════════════════════════════════════╝
+
+  ✅ INFORME_ARCHIVOS.md     - Análisis detallado completo
+  ✅ PLAN_LIMPIEZA.md        - Plan paso a paso ejecutable
+  ✅ RESUMEN_LIMPIEZA.txt    - Este resumen rápido
+
+╔════════════════════════════════════════════════════════════════╗
+║  💡 TIP: Empieza por comparar los duplicados (5 minutos)      ║
+║      y luego reorganiza scripts por categorías (30 minutos)   ║
+╚════════════════════════════════════════════════════════════════╝

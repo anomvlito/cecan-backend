@@ -607,17 +607,26 @@ class MyResponsibilityItem(BaseModel):
 
     # Resource details
     title: str  # Activity description or Project title
+    project_id: Optional[int] = None  # Parent project ID (for activities)
     project_name: Optional[str] = None  # Parent project name (for activities)
     project_code: Optional[str] = None  # Project code (e.g., "P-08")
 
     # Status and timeline
     status: Optional[str] = None  # Activity or Project status
+    start_date: Optional[datetime] = None # start_month for activities, start_date for projects
     deadline: Optional[datetime] = None  # end_month for activities, end_date for projects
     is_overdue: bool = False
 
     # Additional context
     progress: Optional[float] = None  # 0.0 to 1.0
     budget_allocated: Optional[float] = None
+
+    # Accountability (who supervises)
+    accountable_name: Optional[str] = None  # Name of person with "A" role
+    accountable_email: Optional[str] = None  # Email of person with "A" role
+    
+    # Assignments (who executes)
+    assigned_names: List[str] = []  # Names of people with "R" role
 
     class Config:
         from_attributes = True

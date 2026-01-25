@@ -99,5 +99,22 @@ class AuthService:
         return access_token
     
     def get_user_by_email(self, email: str) -> Optional[User]:
-        """Get user by email"""
-        return self.db.query(User).filter(User.email == email).first()
+        """
+        Get user by email and attach academic_member if exists.
+
+        This is critical for authorization checks that need member_id.
+        """
+        from core.models import AcademicMember
+
+        user = self.db.query(User).filter(User.email == email).first()
+
+        if user:
+            # Manually load academic_member by email match
+            academic_member = self.db.query(AcademicMember).filter_by(
+                email=user.email
+            ).first()
+
+            # Attach as attribute (not a real relationship, but works for authz)
+            user._academic_member = academic_member
+
+        return user

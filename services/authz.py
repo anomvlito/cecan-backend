@@ -154,6 +154,11 @@ def can(
     # ProjectActivity
     # -------------------------
     elif resource_type == "ProjectActivity":
+        # CRITICAL: Creator always has edit permission
+        if action in ["update", "delete"] and hasattr(resource, 'created_by'):
+            if resource.created_by == user.id:
+                return True
+
         # Activity permissions depend on the parent project
         # Load the parent project and check permissions on it
         project = getattr(resource, 'project', None)
