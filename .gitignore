@@ -130,3 +130,12 @@ data/publications/*.pdf
 # Ignorar PDFs de datos
 data/publications/*.pdf
 data/publications/*/*.pdf
+
+# ===========================
+# ARCHIVADO (2026-01-25 cleanup)
+# ===========================
+archive/
+archive/**/*
+
+# Debug scripts organizados
+scripts/debug/
